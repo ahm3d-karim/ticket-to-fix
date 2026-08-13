@@ -1,0 +1,4 @@
+install_cmd: ""
+test_cmd: "node --test"
+run_cmd: "node ingest.js"
+app_type: js

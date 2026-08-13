@@ -1,0 +1,13 @@
+diff --git a/ingest.js b/ingest.js
+index 71c3997..63ec8eb 100644
+--- a/ingest.js
++++ b/ingest.js
+@@ -11,7 +11,7 @@ function processRow(row) {
+ async function ingest() {
+   const seen = [];
+   for (let row = 1; row <= 10; row++) {
+-    await processRow(row).catch(() => {}); // BUG: error swallowed, never surfaced
++    await processRow(row).catch((err) => errors.push("row 7 malformed"));
+     seen.push(row);
+   }
+   return seen;

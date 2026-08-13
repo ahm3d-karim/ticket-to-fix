@@ -1,0 +1,11 @@
+diff --git a/billing.py b/billing.py
+index b9857e5..b69c38d 100644
+--- a/billing.py
++++ b/billing.py
+@@ -1,2 +1,5 @@
++from config import TAX_RATE
++
++
+ def invoice(amount):
+-    return amount * (1 + 0.15)  # BUG: hardcoded rate, ignores config.TAX_RATE
++    return amount * (1 + TAX_RATE)

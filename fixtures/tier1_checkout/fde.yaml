@@ -1,0 +1,4 @@
+install_cmd: ""
+test_cmd: "node --test"
+run_cmd: "node -e \"console.log(require('./calc.js').total(10,3))\""
+app_type: js
