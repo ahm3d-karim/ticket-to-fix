@@ -262,6 +262,17 @@ def _copy_repro(worktree: str, repro_path: Path) -> None:
         repro_path.read_text(encoding="utf-8"), encoding="utf-8")
 
 
+def _worktree_snapshot(worktree: str) -> tuple:
+    """(tracked-changes, HEAD, skip-worktree-flag-count) — mutation guard inputs."""
+    p = subprocess.run(["git", "-C", worktree, "status", "--porcelain"],
+                       capture_output=True, text=True)
+    tracked = [l for l in p.stdout.splitlines() if l.strip() and not l.startswith("??")]
+    s = subprocess.run(["git", "-C", worktree, "ls-files", "-v"],
+                       capture_output=True, text=True)
+    flags = sum(1 for l in s.stdout.splitlines() if l and l[0].islower())
+    return (tracked, _head(worktree), flags)
+
+
 def fix_loop(run_id: str, worktree: str, manifest: dict, ticket: dict,
              repro_path: Path, max_rounds: int = FIX_ROUNDS) -> dict:
     """Iterate codex until the repro test + full suite pass. Resets between rounds."""
@@ -292,9 +303,13 @@ def fix_loop(run_id: str, worktree: str, manifest: dict, ticket: dict,
         r = run_cmd(f"{manifest['test_cmd']} {shlex.quote(repro_path.name)}",
                     worktree, timeout=120)
         suite = None
+        mutated = False
         if r["rc"] == 0:
+            before = _worktree_snapshot(worktree)
             suite = run_cmd(manifest["test_cmd"], worktree, timeout=180)
-        ok = r["rc"] == 0 and suite is not None and suite["rc"] == 0
+            after = _worktree_snapshot(worktree)
+            mutated = before != after
+        ok = r["rc"] == 0 and suite is not None and suite["rc"] == 0 and not mutated
         append(run_id, "fix_attempt", {
             "round": rnd, "ok": ok, "rc": r["rc"], "diff_bytes": len(diff),
             "duration_ms": res["duration_ms"], "summary": res["summary"],
@@ -304,6 +319,11 @@ def fix_loop(run_id: str, worktree: str, manifest: dict, ticket: dict,
             return {"ok": True, "rounds": rnd, "diff": diff,
                     "summary": res["summary"]}
         _reset_worktree(worktree)
+        if mutated:
+            feedback = ("the suite run mutated the worktree (tracked files "
+                        "changed, commits created, or index flags set) — do "
+                        "not touch anything except the minimal source fix")
+            continue
         evidence = r["out"] if r["rc"] != 0 else (suite["out"] if suite else "")
         feedback = evidence[-2000:]
     return {"ok": False, "reason": "max rounds reached", "rounds": max_rounds}

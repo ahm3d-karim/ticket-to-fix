@@ -139,7 +139,16 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
         return _verdict(checks, started, run_id, ticket, repro_name)
 
     # --- State C: no regression ---------------------------------------------
+    # The suite runs WITHOUT the repro test file present (it is removed first):
+    # state C answers "does the fix break the repo's OWN tests?" — running the
+    # agent-written file here hands it a tampering surface (staging, commits,
+    # skip-worktree — all observed in the wild). Repro-test-in-suite
+    # integration is verified later by the fix stage.
     c_t0 = time.monotonic()
+    try:
+        (wt / repro_name).unlink()
+    except OSError:
+        pass
     before = _porcelain(wt)
     r = run_cmd(manifest["test_cmd"], str(wt), timeout=timeout)
     after = _porcelain(wt)
@@ -147,7 +156,7 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
     ok_c = r["rc"] == 0 and before == after and not head_moved
     checks["c"] = _check(
         ok=ok_c, rc=r["rc"], duration_ms=_ms(c_t0), out=r["out"],
-        detail=("full suite green with gold" if ok_c
+        detail=("full suite green with gold (repro file excluded)" if ok_c
                 else (f"full suite failed with gold applied (rc={r['rc']})"
                       if r["rc"] != 0
                       else ("suite mutated the worktree (tracked files changed "
@@ -205,9 +214,15 @@ def _restore(wt: Path) -> None:
 
     reset --hard (not checkout .) so STAGED modifications are reverted too —
     a repro test could otherwise stage a rewritten fixture test and survive
-    the restore (observed in the wild).
+    the restore (observed in the wild). Also purges skip-worktree / assume-
+    unchanged bits (another observed evasion): those flags make git ignore
+    on-disk changes, so they are cleared before the reset.
     """
-    run_cmd("git reset --hard HEAD && git clean -fd", str(wt), timeout=120)
+    run_cmd(
+        "git ls-files -v | awk '/^[a-z]/ {print substr($0,3)}' "
+        "| xargs -d '\\n' -r git update-index --no-skip-worktree -- "
+        "&& git reset --hard HEAD && git clean -fd",
+        str(wt), timeout=120)
 
 
 def _restore_guarded(wt: Path, baseline_head: str) -> bool:
