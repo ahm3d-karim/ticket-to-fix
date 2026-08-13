@@ -99,7 +99,7 @@ The pipeline ran on Windows against real agent processes. The failures were as i
 
 ## What's next
 
-- `fde bench` — full-corpus pass-rate command (Stage 5, not built).
+- ~~`fde bench`~~ — built 2026-08-14 (real-agent and deterministic mock modes; the README's bench tables are its output). `fde resume` also shipped: a real stuck run was recovered live.
 - A second agent backend, to demonstrate `FDE_AGENT_BACKEND` pluggability live (currently only codex is implemented).
 - A Docker sandbox when one is available — the worktree+subprocess sandbox is a documented limitation, not the target state.
 - Real human approvals on the demo runs: they sit at `awaiting_approval` by design until someone actually approves them.
