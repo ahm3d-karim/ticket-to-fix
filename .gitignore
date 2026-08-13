@@ -4,3 +4,4 @@ fixtures/*/.git/
 demo-app/.git/
 __pycache__/
 *.egg-info/
+.venv/

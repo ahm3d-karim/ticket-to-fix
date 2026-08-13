@@ -5,8 +5,8 @@ RUNS_DIR = Path("runs")
 EVENTS = {"ticket_parsed","worktree_created","repro_test_written","test_result",
           "fix_attempt","gates_passed","gates_failed","evidence_packaged",
           "approved","rejected","deployed","rolled_back","agent_error","resumed",
-          "state_changed"}  # NOTE: "state_changed" added to the PLAN.md vocabulary —
-                            # set_state() appends it, so it must be a legal event.
+          "state_changed"}  # NOTE: set_state() appends "state_changed", so it
+                            # must be a legal event.
 STATES = ["submitted","reproducing","reproved","fixing","fixed","gating","gated",
           "awaiting_approval","approved","deploying","deployed","rolling_back",
           "rolled_back","failed"]

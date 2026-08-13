@@ -133,6 +133,6 @@ Every claim above is traceable to the evidence pack (`case-study-evidence.md`, e
 - **Process-tree corpses, `[WinError 2]` / PATH, codex version** — evidence pack §7; `STATUS.md:35-43`; run-state inventory in evidence pack §7b.
 - **`ROUND_TIMEOUT = 900`** — `fde/agents.py:28`; logged fix-round durations — `runs/acceptance-verify.log`, `runs/_acceptance.log`.
 - **Repro prompt "UNTOUCHED" warning** — `fde/agents.py:209-212`.
-- **`FDE_AGENT_BACKEND` pluggability (codex implemented only)** — `fde/agents.py:25`; `README.md:70`.
-- **Sandbox = worktree + timeouts, not Docker; taskkill best-effort** — `README.md:125`; `fde/harness.py:1-8, 52-66`.
+- **`FDE_AGENT_BACKEND` pluggability (codex implemented only)** — `fde/agents.py:25`; README "Bring your own key" section.
+- **Sandbox = worktree + timeouts, not Docker; taskkill best-effort** — README "Security model" section; `fde/harness.py:1-8, 52-66`.
 - **Public repo, pushed HEAD `0d73a7c`** — `STATUS.md:52-55`.

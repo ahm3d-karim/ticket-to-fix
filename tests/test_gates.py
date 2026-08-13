@@ -1,6 +1,6 @@
 """Tests for fde.gates — secret scan + security lint over unified diffs.
 
-Per EXECUTION.md S3T1: scan_diff() scans only '+' added lines of a unified
+scan_diff() scans only '+' added lines of a unified
 diff (skipping ---/+++ headers); findings are (line_number, pattern, snippet).
 """
 

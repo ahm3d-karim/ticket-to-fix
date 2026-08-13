@@ -1,6 +1,6 @@
 """Agent orchestration: non-interactive Codex wrapper + repro/fix loops.
 
-Contracts (EXECUTION.md S1T6 / S2T1):
+Contracts:
 - codex exec runs in the run's worktree only; paths in prompts are MSYS-safe
   (forward slashes, C:/ form).
 - The repro loop writes ONE failing test file; the 3-state harness verdict
