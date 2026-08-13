@@ -86,6 +86,7 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
     """
     wt = Path(worktree).resolve()
     run_id = wt.parent.name
+    baseline_head = _head(wt)
     # resolve: `git -C <wt> apply <path>` resolves relative paths against the
     # worktree, not the process CWD — absolute paths are immune
     gold = (Path(repo) / "gold.patch").resolve()
@@ -115,7 +116,7 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
     if not gold.exists():
         checks["b"] = _check(False, None, 0, "",
                              detail=f"gold.patch not found at {gold}")
-        _restore(wt)
+        _restore_guarded(wt, baseline_head)
         return _verdict(checks, started, run_id, ticket, repro_name)
     b_t0 = time.monotonic()
     apply_r = run_cmd(
@@ -133,7 +134,7 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
               else f"repro test failed with gold applied (rc={r['rc']})")
     checks["b"] = _check(ok=ok_b, rc=r["rc"], duration_ms=_ms(b_t0), out=r["out"],
                          detail=detail)
-    _restore(wt)
+    _restore_guarded(wt, baseline_head)
     if not ok_b:
         return _verdict(checks, started, run_id, ticket, repro_name)
 
@@ -142,15 +143,16 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
     before = _porcelain(wt)
     r = run_cmd(manifest["test_cmd"], str(wt), timeout=timeout)
     after = _porcelain(wt)
-    ok_c = r["rc"] == 0 and before == after
+    head_moved = _head(wt) != baseline_head
+    ok_c = r["rc"] == 0 and before == after and not head_moved
     checks["c"] = _check(
         ok=ok_c, rc=r["rc"], duration_ms=_ms(c_t0), out=r["out"],
         detail=("full suite green with gold" if ok_c
                 else (f"full suite failed with gold applied (rc={r['rc']})"
                       if r["rc"] != 0
-                      else "suite mutated the worktree (tracked files changed "
-                           "during the run)")))
-    _restore(wt)
+                      else ("suite mutated the worktree (tracked files changed "
+                            "or a commit was created during the run)"))))
+    _restore_guarded(wt, baseline_head)
 
     return _verdict(checks, started, run_id, ticket, repro_name)
 
@@ -172,6 +174,11 @@ def _check(ok: bool, rc: int | None, duration_ms: int, out: str, detail: str) ->
 
 def _ms(t0: float) -> int:
     return int(round((time.monotonic() - t0) * 1000))
+
+
+def _head(wt: Path) -> str:
+    r = run_cmd("git rev-parse HEAD", str(wt), timeout=30)
+    return r["out"].strip()
 
 
 def _porcelain(wt: Path) -> list[str]:
@@ -201,6 +208,16 @@ def _restore(wt: Path) -> None:
     the restore (observed in the wild).
     """
     run_cmd("git reset --hard HEAD && git clean -fd", str(wt), timeout=120)
+
+
+def _restore_guarded(wt: Path, baseline_head: str) -> bool:
+    """Restore; if the run created commits (they survive restore), hard-reset
+    back to the baseline and report True. Call after EVERY state."""
+    _restore(wt)
+    if _head(wt) != baseline_head:
+        run_cmd(f"git reset --hard {shlex.quote(baseline_head)}", str(wt), timeout=120)
+        return True
+    return False
 
 
 def _verdict(checks: dict, started: float, run_id: str, ticket: dict,

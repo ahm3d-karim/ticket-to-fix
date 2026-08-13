@@ -24,7 +24,7 @@ from .runlog import append, run_dir
 BACKEND = "codex"
 REPRO_ATTEMPTS = 3
 FIX_ROUNDS = 8
-ROUND_TIMEOUT = 600
+ROUND_TIMEOUT = 900
 REPRO_FILES = {"js": "repro.test.js", "py": "repro_test.py"}
 
 
@@ -244,6 +244,12 @@ def _git_diff(worktree: str) -> str:
     return r.stdout
 
 
+def _head(worktree: str) -> str:
+    r = subprocess.run(["git", "-C", worktree, "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
 def _reset_worktree(worktree: str) -> None:
     subprocess.run(["git", "-C", worktree, "checkout", "."],
                    capture_output=True, text=True)
@@ -261,9 +267,15 @@ def fix_loop(run_id: str, worktree: str, manifest: dict, ticket: dict,
     """Iterate codex until the repro test + full suite pass. Resets between rounds."""
     feedback = None
     narrowed = False
+    baseline_head = _head(worktree)
     for rnd in range(1, max_rounds + 1):
         prompt = _fix_prompt(ticket, manifest, repro_path, feedback)
         res = codex_exec(prompt, cwd=worktree)
+        if _head(worktree) != baseline_head:
+            # agent committed during the round — reset back to baseline
+            _reset_worktree(worktree)
+            subprocess.run(["git", "-C", worktree, "reset", "--hard", baseline_head],
+                           capture_output=True, text=True)
         if res["timed_out"]:
             append(run_id, "agent_error",
                    {"stage": "fix", "round": rnd, "reason": "timeout"})
