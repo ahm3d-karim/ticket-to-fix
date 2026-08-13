@@ -21,6 +21,7 @@ from pathlib import Path
 from .config import load_repo_manifest
 from .harness import run_cmd, verify_repro
 from .runlog import append, run_dir
+from .ticket import parse_ticket
 
 BACKEND = os.environ.get("FDE_AGENT_BACKEND", "codex")
 REPRO_ATTEMPTS = 3
@@ -35,6 +36,8 @@ class AgentAuthError(Exception):
 
 
 def codex_version() -> str:
+    if BACKEND == "mock":
+        return "mock"  # never touch the codex binary in mock mode
     try:
         r = subprocess.run(["codex", "--version"], capture_output=True,
                            text=True, timeout=15)
@@ -138,6 +141,9 @@ def codex_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     (`taskkill /F /T`) on expiry — the timeout is guaranteed to fire.
     """
     t0 = time.monotonic()
+    if BACKEND == "mock":
+        # deterministic offline stand-in: no codex, no network, no key
+        return _mock_exec(prompt, cwd, timeout)
     flags = ["codex", "exec", "--json", "-s", "danger-full-access", "-C", cwd, prompt]
     env = os.environ.copy()
     if "OPENCODE_GO_API_KEY" not in env:
@@ -184,6 +190,145 @@ def _kill_proc_tree(pid: int) -> None:
     """Kill the process tree (taskkill /T catches the node wrapper's children)."""
     subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                    capture_output=True, text=True)
+
+
+# --------------------------------------------------------------------------- #
+# deterministic mock backend (FDE_AGENT_BACKEND=mock)
+# --------------------------------------------------------------------------- #
+# The mock makes every agent step deterministic and offline: the repro step
+# writes ONE test file that runs the fixture's OWN suite (scoped to its test
+# dir so the inner run never re-discovers the repro file itself) and fails
+# with the ticket symptom as its message while the bug reproduces — the
+# 3-state harness then verifies it exactly like a codex-written test. The fix
+# step applies the fixture's gold.patch (the perfect fix). No codex binary is
+# ever invoked and no network or key is touched.
+#
+# Stage detection uses the prompt the loops already build (see _repro_prompt /
+# _fix_prompt); everything else (ticket, repo, manifest, repro path) is read
+# from the run's own artifacts under runs/<run_id>/, resolved from the
+# worktree path the CLI always creates.
+
+def _suite_target(wt: Path) -> str:
+    """Directory holding the fixture's own node tests (js repro template)."""
+    for name in ("test", "tests"):
+        if (wt / name).is_dir() and any((wt / name).glob("*.test.js")):
+            return name
+    return "test"
+
+
+def _mock_repro_content(ticket: dict, manifest: dict, wt: Path,
+                        repro_name: str) -> str:
+    """Deterministic repro test: fails with the symptom while the bug is
+    present (harness state A), passes once the fix is in (state B)."""
+    symptom = json.dumps(ticket["symptom"])
+    if manifest["app_type"] == "py":
+        return (
+            "# FDE_AGENT_BACKEND=mock: deterministic repro test (offline).\n"
+            "# Runs the fixture's own suite; FAILS with the ticket symptom as\n"
+            "# its message while the bug reproduces, passes once fixed.\n"
+            "import subprocess\n"
+            "import sys\n"
+            "\n"
+            "def test_repro():\n"
+            "    r = subprocess.run(\n"
+            "        [sys.executable, \"-m\", \"pytest\", \"-q\",\n"
+            f"         \"--ignore={repro_name}\"],\n"
+            "        capture_output=True, text=True, timeout=120,\n"
+            "    )\n"
+            "    if r.returncode != 0:\n"
+            f"        raise AssertionError({symptom})\n"
+        )
+    return (
+        "// FDE_AGENT_BACKEND=mock: deterministic repro test (offline).\n"
+        "// Runs the fixture's own suite; FAILS with the ticket symptom as\n"
+        "// its message while the bug reproduces, passes once fixed.\n"
+        'const { execFileSync } = require("node:child_process");\n'
+        'const assert = require("node:assert");\n'
+        'const fs = require("node:fs");\n'
+        'const path = require("node:path");\n'
+        "\n"
+        "const env = { ...process.env };\n"
+        "delete env.NODE_TEST_CONTEXT; // else inner runner skips files\n"
+        f"        const MY_NAME = {json.dumps(repro_name)};\n"
+        "const tests = [];\n"
+        "function walk(dir) {\n"
+        "  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {\n"
+        "    if (e.name === 'node_modules') continue;\n"
+        "    const p = path.join(dir, e.name);\n"
+        "    if (e.isDirectory()) walk(p);\n"
+        "    else if (e.name.endsWith('.test.js') && e.name !== MY_NAME) tests.push(p);\n"
+        "  }\n"
+        "}\n"
+        "walk('.');\n"
+        "if (tests.length === 0) { assert.fail('no fixture tests found by mock repro'); }\n"
+        "let failed = false;\n"
+        "try {\n"
+        "  execFileSync(process.execPath, ['--test', ...tests], {\n"
+        "    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],\n"
+        "    timeout: 120000,\n"
+        "    env,\n"
+        "  });\n"
+        "} catch (e) {\n"
+        "  failed = true;\n"
+        "}\n"
+        "\n"
+        "if (failed) {\n"
+        f"  assert.fail({symptom});\n"
+        "}\n"
+    )
+
+def _mock_write_repro(cwd: str) -> None:
+    """Write the deterministic repro test to the run dir (harness copies it)."""
+    wt = Path(cwd)
+    run_id = wt.parent.name
+    ticket = parse_ticket(run_dir(run_id) / "ticket.md")
+    repo = resolve_repo(ticket["system"])
+    manifest = load_repo_manifest(Path(repo))
+    repro_name = REPRO_FILES.get(manifest.get("app_type"), "js")
+    repro_path = run_dir(run_id) / repro_name
+    repro_path.write_text(_mock_repro_content(ticket, manifest, wt, repro_name),
+                          encoding="utf-8")
+
+
+def _mock_apply_gold(cwd: str) -> None:
+    """Apply the fixture's gold.patch to the worktree — the perfect fix."""
+    wt = Path(cwd)
+    run_id = wt.parent.name
+    ticket = parse_ticket(run_dir(run_id) / "ticket.md")
+    repo = resolve_repo(ticket["system"])
+    gold = (Path(repo) / "gold.patch").resolve()
+    if not gold.is_file():
+        raise RuntimeError(f"gold.patch not found at {gold}")
+    r = subprocess.run(["git", "-C", str(wt), "apply", str(gold)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:  # Windows CRLF tolerance, same as the harness
+        r = subprocess.run(["git", "-C", str(wt), "apply",
+                            "--ignore-whitespace", str(gold)],
+                           capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"gold.patch failed to apply: "
+                           f"{r.stderr.strip()[-300:]}")
+
+
+def _mock_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
+    """Deterministic offline stand-in for codex (FDE_AGENT_BACKEND=mock).
+
+    Same return shape as codex_exec: rc/out/timed_out/summary/duration_ms.
+    """
+    t0 = time.monotonic()
+    try:
+        if "write ONE failing test file" in prompt:
+            _mock_write_repro(cwd)
+        else:
+            _mock_apply_gold(cwd)
+    except Exception as e:
+        return {"rc": 1, "out": f"mock agent error: {e}", "timed_out": False,
+                "summary": "",
+                "duration_ms": int((time.monotonic() - t0) * 1000)}
+    return {"rc": 0, "out": "[mock] deterministic step complete",
+            "timed_out": False,
+            "summary": "mock backend: deterministic offline step",
+            "duration_ms": int((time.monotonic() - t0) * 1000)}
 
 
 def _repro_prompt(ticket: dict, manifest: dict, repro_path: Path,
