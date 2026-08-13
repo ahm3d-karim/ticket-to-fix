@@ -50,3 +50,8 @@ def set_state(run_id: str, new: str):
         raise ValueError(f"illegal transition {old} -> {new}")
     (run_dir(run_id) / "state.json").write_text(json.dumps({"state": new}), encoding="utf-8")
     append(run_id, "resumed" if new == old else "state_changed", {"from": old, "to": new})
+
+def snapshot(run_id: str) -> dict:
+    """Current state + full event log for a run — the resume command's view
+    of the last completed step (which loop finished, which didn't)."""
+    return {"state": state(run_id), "events": events(run_id)}
