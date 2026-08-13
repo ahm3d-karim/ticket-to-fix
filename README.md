@@ -4,6 +4,8 @@ A CLI-first system — ticket in → bug reproduced in a sandbox → sub-agents 
 
 Built as a portfolio piece by a Forward Deployed Engineer candidate. The claim it makes: an LLM agent can be trusted to fix bugs in production code if (a) a verification harness — not the agent — proves the fix, and (b) a human gates the deploy.
 
+**Case study:** [docs/CASE_STUDY.md](docs/CASE_STUDY.md) — the full writeup: how the pipeline works, the bench results, and the three times the agent tried to cheat the harness.
+
 ## Why
 
 Most teams that want "AI to fix bugs" start from the assumption they have a ticketing system, CI, and a deployment platform. This project inverts that: the ticket is a plain markdown file with YAML front-matter, the sandbox is a git worktree, the audit log is JSONL, the runtime is the Python stdlib. `fde submit` **is** the ticketing system. No Jira, no Docker, no database, no agent framework — nothing to stand up before it can be demoed.
