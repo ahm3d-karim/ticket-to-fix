@@ -1,4 +1,5 @@
 runs/
+tests/scratch_repos/
 fixtures/*/.git/
 demo-app/.git/
 __pycache__/
