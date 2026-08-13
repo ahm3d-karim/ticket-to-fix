@@ -14,5 +14,8 @@ fde = "fde.cli:main"
 [tool.setuptools]
 packages = ["fde"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [dependency-groups]
 dev = ["pytest"]
