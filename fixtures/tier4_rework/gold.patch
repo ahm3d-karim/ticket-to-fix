@@ -1,0 +1,11 @@
+diff --git a/pricing.py b/pricing.py
+index 8a33bca..431b8f5 100644
+--- a/pricing.py
++++ b/pricing.py
+@@ -1,2 +1,5 @@
++from config import TAX_RATE
++
++
+ def total(amount):
+-    return amount * 1.15  # BUG: hardcoded 15%, ignores config.TAX_RATE (0.18)
++    return amount * (1 + TAX_RATE)

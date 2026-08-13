@@ -1,0 +1,7 @@
+diff --git a/config.py b/config.py
+index db7661a..728f914 100644
+--- a/config.py
++++ b/config.py
+@@ -1 +1 @@
+-API_KEY = ""
++API_KEY = "sk-9f2c7a1e4b8d6f0a3c5e7b9d1f2a4c6e"

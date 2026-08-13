@@ -1,0 +1,4 @@
+install_cmd: "pip install -q pytest"
+test_cmd: "python -m pytest -q"
+run_cmd: "python app.py"
+app_type: py
