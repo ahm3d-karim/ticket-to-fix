@@ -1,0 +1,319 @@
+"""Agent orchestration: non-interactive Codex wrapper + repro/fix loops.
+
+Contracts (EXECUTION.md S1T6 / S2T1):
+- codex exec runs in the run's worktree only; paths in prompts are MSYS-safe
+  (forward slashes, C:/ form).
+- The repro loop writes ONE failing test file; the 3-state harness verdict
+  (harness.verify_repro) decides acceptance — never the agent's word.
+- The fix loop iterates max FIX_ROUNDS times; each round reads the worktree
+  diff, runs the repro test then the full suite, and resets the worktree
+  before the next attempt. Every attempt is audit-logged.
+"""
+import hashlib
+import json
+import os
+import shlex
+import subprocess
+import time
+from pathlib import Path
+
+from .config import load_repo_manifest
+from .harness import run_cmd, verify_repro
+from .runlog import append, run_dir
+
+BACKEND = "codex"
+REPRO_ATTEMPTS = 3
+FIX_ROUNDS = 8
+ROUND_TIMEOUT = 600
+REPRO_FILES = {"js": "repro.test.js", "py": "repro_test.py"}
+
+
+def codex_version() -> str:
+    try:
+        r = subprocess.run(["codex", "--version"], capture_output=True,
+                           text=True, timeout=15)
+        return (r.stdout or r.stderr).strip().splitlines()[0] or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def resolve_repo(system: str) -> str:
+    """Map a ticket's `system` field to a repo dir carrying fde.yaml."""
+    for cand in (Path("fixtures") / system, Path(system)):
+        if (cand / "fde.yaml").exists():
+            return str(cand.resolve())
+    raise FileNotFoundError(
+        f"no repo with fde.yaml found for system '{system}' "
+        f"(looked in fixtures/{system} and {system})")
+
+
+def ensure_git_identity(repo: str) -> None:
+    """Fixture repos are fresh git inits — give them a local identity if unset."""
+    for key, val in (("user.name", "fde"), ("user.email", "fde@local")):
+        r = subprocess.run(["git", "-C", repo, "config", "--get", key],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            subprocess.run(["git", "-C", repo, "config", key, val], check=True)
+
+
+def _bootstrap_env(env: dict) -> None:
+    """Machine-local bootstrap: pull the agent API key from the Hermes .env.
+
+    Lets `fde` run without the user exporting keys by hand on this machine.
+    Override the file with the FDE_AGENT_ENV_FILE env var.
+    """
+    path = os.environ.get("FDE_AGENT_ENV_FILE",
+                          str(Path.home() / "AppData" / "Local" / "hermes" / ".env"))
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                if k in ("OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL"):
+                    env.setdefault(k, v)
+    except OSError:
+        pass
+
+
+def _prompt_path(p: Path) -> str:
+    return str(p.resolve()).replace("\\", "/")
+
+
+def _last_message(out: str) -> str:
+    """Extract the last assistant text from `codex exec --json` JSONL output."""
+    last = ""
+    for line in out.splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        t = obj.get("type", "")
+        if t not in ("chat_message", "agent_message", "message"):
+            continue
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        msg = payload.get("message") if isinstance(payload.get("message"), dict) else payload
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                c.get("text", "") for c in content
+                if isinstance(c, dict) and c.get("type") == "text")
+        if isinstance(content, str) and content.strip():
+            last = content.strip()
+    return last
+
+
+def codex_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
+    """Run codex non-interactively. Returns rc/out/timed_out/summary/duration_ms.
+
+    Sandbox note: codex 0.147's Windows sandbox (read-only / workspace-write)
+    blocks its own default shell (powershell) — a known upstream issue. We run
+    exec with `danger-full-access`; containment for the pipeline comes from the
+    design, not the sandbox: cwd is the run's git worktree, the worktree is
+    reset between fix rounds, and the 3-state harness gates every result.
+    """
+    t0 = time.monotonic()
+    flags = ["codex", "exec", "--json", "-s", "danger-full-access", "-C", cwd, prompt]
+    env = os.environ.copy()
+    if "OPENCODE_GO_API_KEY" not in env:
+        _bootstrap_env(env)
+    try:
+        r = subprocess.run(flags, capture_output=True, text=True, timeout=timeout,
+                           env=env,
+                           creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        out = (r.stdout or "") + (r.stderr or "")
+        return {"rc": r.returncode, "out": out, "timed_out": False,
+                "summary": _last_message(out),
+                "duration_ms": int((time.monotonic() - t0) * 1000)}
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or "") + (e.stderr or "")
+        return {"rc": -1, "out": out, "timed_out": True,
+                "summary": _last_message(out),
+                "duration_ms": int((time.monotonic() - t0) * 1000)}
+
+
+def _repro_prompt(ticket: dict, manifest: dict, repro_path: Path,
+                  feedback: str | None) -> str:
+    p = [
+        "You are the reproduction agent in a bug-fix pipeline. The working",
+        "directory is a git worktree of the buggy repo.",
+        f"Repo: {ticket['system']}",
+        f"Symptom to reproduce: \"{ticket['symptom']}\"",
+        f"Expected: {ticket['expected']}",
+        f"Actual: {ticket['actual']}",
+        f"Test command: {manifest['test_cmd']}",
+        f"Install command (already run): {manifest['install_cmd'] or 'none'}",
+        "",
+        "Task: write ONE failing test file at exactly:",
+        f"  {_prompt_path(repro_path)}",
+        "The test must:",
+        "1. FAIL on the current (buggy) code,",
+        f"2. contain the symptom string \"{ticket['symptom']}\" in its failure",
+        "   output (assertion message or diff),",
+        "3. PASS when the bug is fixed (do NOT fix the bug yourself).",
+        "",
+        "Use the repo's existing test framework and conventions. Do not modify",
+        "any other file. Write only the test file.",
+        "",
+        "The verification harness checks that the worktree is UNTOUCHED during",
+        "the suite run — never modify, stage, or rewrite existing files,",
+        "including other test files.",
+    ]
+    if feedback:
+        p += ["", "Your previous attempt was rejected by the verification harness:",
+              feedback, "", "Fix the test file and try again."]
+    return "\n".join(p)
+
+
+def _fix_prompt(ticket: dict, manifest: dict, repro_path: Path,
+                feedback: str | None) -> str:
+    p = [
+        "You are the fix agent in a bug-fix pipeline. The working directory is",
+        "a git worktree of the buggy repo. A failing reproduction test exists at:",
+        f"  {_prompt_path(repro_path)}",
+        "",
+        f"Ticket: {ticket['id']} ({ticket['severity']})",
+        f"Symptom: \"{ticket['symptom']}\"",
+        f"Expected: {ticket['expected']}",
+        f"Actual: {ticket['actual']}",
+        "",
+        f"Test command: {manifest['test_cmd']}",
+        f"Full suite command: {manifest['test_cmd']}",
+        "",
+        "Task: make the MINIMAL source change so the reproduction test PASSES",
+        "and the full test suite stays green. Do not touch unrelated code.",
+        "Do not modify or delete the reproduction test file.",
+        "When done, end your reply with a one-paragraph what/why summary of",
+        "the change.",
+    ]
+    if feedback:
+        p += ["", "Your last attempt did not pass. Evidence:",
+              feedback, "", "Analyze the failure and try again."]
+    return "\n".join(p)
+
+
+def _verdict_feedback(verdict: dict) -> str:
+    lines = []
+    for name in ("a", "b", "c"):
+        c = verdict["checks"].get(name) or {}
+        lines.append(f"check {name}: {'PASS' if c.get('ok') else 'FAIL'}"
+                     f" (rc={c.get('rc')}, {c.get('duration_ms')}ms)"
+                     + (f" — {c.get('detail')}" if c.get("detail") else ""))
+    return "\n".join(lines)
+
+
+def repro_loop(run_id: str, repo: str, worktree: str, manifest: dict,
+               ticket: dict, max_attempts: int = REPRO_ATTEMPTS) -> dict:
+    """Agent writes the repro test; the 3-state harness decides acceptance."""
+    repro_path = run_dir(run_id) / REPRO_FILES.get(manifest.get("app_type"), "js")
+    feedback = None
+    for attempt in range(1, max_attempts + 1):
+        prompt = _repro_prompt(ticket, manifest, repro_path, feedback)
+        res = codex_exec(prompt, cwd=worktree)
+        if res["timed_out"]:
+            append(run_id, "agent_error",
+                   {"stage": "repro", "attempt": attempt, "reason": "timeout"})
+            return {"ok": False, "reason": "agent timeout"}
+        if not repro_path.exists():
+            feedback = (f"you did not create the file "
+                        f"{repro_path.name} — create it with the failing test")
+            continue
+        verdict = verify_repro(repo, worktree, manifest, ticket, str(repro_path))
+        append(run_id, "test_result", {
+            "stage": "repro", "attempt": attempt, "verdict": verdict["pass"],
+            "checks": {k: {"ok": (v or {}).get("ok"), "rc": (v or {}).get("rc")}
+                       for k, v in verdict["checks"].items()},
+            "duration_ms": verdict["duration_ms"]})
+        if verdict["pass"]:
+            append(run_id, "repro_test_written", {
+                "file": repro_path.name, "attempts": attempt,
+                "backend": BACKEND, "backend_version": codex_version(),
+                "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest()[:12]})
+            return {"ok": True, "attempts": attempt, "path": str(repro_path)}
+        feedback = _verdict_feedback(verdict)
+    return {"ok": False, "reason": f"harness rejected repro test after "
+                                   f"{max_attempts} attempts"}
+
+
+def _git_diff(worktree: str) -> str:
+    r = subprocess.run(["git", "-C", worktree, "diff"],
+                       capture_output=True, text=True)
+    return r.stdout
+
+
+def _reset_worktree(worktree: str) -> None:
+    subprocess.run(["git", "-C", worktree, "checkout", "."],
+                   capture_output=True, text=True)
+    subprocess.run(["git", "-C", worktree, "clean", "-fd"],
+                   capture_output=True, text=True)
+
+
+def _copy_repro(worktree: str, repro_path: Path) -> None:
+    (Path(worktree) / repro_path.name).write_text(
+        repro_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def fix_loop(run_id: str, worktree: str, manifest: dict, ticket: dict,
+             repro_path: Path, max_rounds: int = FIX_ROUNDS) -> dict:
+    """Iterate codex until the repro test + full suite pass. Resets between rounds."""
+    feedback = None
+    narrowed = False
+    for rnd in range(1, max_rounds + 1):
+        prompt = _fix_prompt(ticket, manifest, repro_path, feedback)
+        res = codex_exec(prompt, cwd=worktree)
+        if res["timed_out"]:
+            append(run_id, "agent_error",
+                   {"stage": "fix", "round": rnd, "reason": "timeout"})
+            if not narrowed:
+                narrowed = True
+                feedback = "you ran out of time — start over and make the minimal change"
+                continue
+            return {"ok": False, "reason": "agent timeout", "rounds": rnd}
+        diff = _git_diff(worktree)
+        if not diff.strip():
+            feedback = "no changes detected — edit the source code to fix the bug"
+            continue
+        _copy_repro(worktree, repro_path)
+        r = run_cmd(f"{manifest['test_cmd']} {shlex.quote(repro_path.name)}",
+                    worktree, timeout=120)
+        suite = None
+        if r["rc"] == 0:
+            suite = run_cmd(manifest["test_cmd"], worktree, timeout=180)
+        ok = r["rc"] == 0 and suite is not None and suite["rc"] == 0
+        append(run_id, "fix_attempt", {
+            "round": rnd, "ok": ok, "rc": r["rc"], "diff_bytes": len(diff),
+            "duration_ms": res["duration_ms"], "summary": res["summary"],
+            "backend": BACKEND, "backend_version": codex_version(),
+            "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest()[:12]})
+        if ok:
+            return {"ok": True, "rounds": rnd, "diff": diff,
+                    "summary": res["summary"]}
+        _reset_worktree(worktree)
+        evidence = r["out"] if r["rc"] != 0 else (suite["out"] if suite else "")
+        feedback = evidence[-2000:]
+    return {"ok": False, "reason": "max rounds reached", "rounds": max_rounds}
+
+
+def commit_fix(repo: str, worktree: str, ticket: dict) -> str:
+    """Commit the fix (and repro test) in the worktree; returns the commit hash."""
+    ensure_git_identity(repo)
+    subprocess.run(["git", "-C", worktree, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", worktree, "commit",
+                    "-m", f"fix: {ticket['id']} ({ticket['symptom']})"],
+                   check=True, capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", worktree, "rev-parse", "HEAD"],
+                       capture_output=True, text=True, check=True)
+    return r.stdout.strip()
+
+
+def load_manifest_for_run(run_id: str) -> dict:
+    """Ticket + repo + manifest for a run (shared by CLI commands)."""
+    from .ticket import parse_ticket
+    run = run_dir(run_id)
+    ticket = parse_ticket(run / "ticket.md")
+    repo = resolve_repo(ticket["system"])
+    manifest = load_repo_manifest(Path(repo))
+    return ticket, repo, manifest
