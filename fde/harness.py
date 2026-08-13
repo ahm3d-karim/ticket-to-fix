@@ -84,10 +84,13 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
     - ``ticket``: parsed ticket dict (needs ["symptom"]).
     - ``repro_test``: path to the agent-written repro test file.
     """
-    wt = Path(worktree)
+    wt = Path(worktree).resolve()
     run_id = wt.parent.name
-    gold = Path(repo) / "gold.patch"
-    repro_name = Path(repro_test).name
+    # resolve: `git -C <wt> apply <path>` resolves relative paths against the
+    # worktree, not the process CWD — absolute paths are immune
+    gold = (Path(repo) / "gold.patch").resolve()
+    repro_test = Path(repro_test).resolve()
+    repro_name = repro_test.name
 
     # copy the repro test into the worktree (untracked; git clean -fd removes it)
     (wt / repro_name).write_text(Path(repro_test).read_text(encoding="utf-8"),
@@ -103,7 +106,7 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
     ok_a = r["rc"] != 0 and symptom_in_output(ticket["symptom"], r["out"])
     checks["a"] = _check(
         ok=ok_a, rc=r["rc"], duration_ms=_ms(a_t0), out=r["out"],
-        detail=_a_detail(r, ticket),
+        detail=_a_detail(ok_a, r, ticket),
     )
     if not ok_a:
         return _verdict(checks, started, run_id, ticket, repro_name)
@@ -136,21 +139,30 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
 
     # --- State C: no regression ---------------------------------------------
     c_t0 = time.monotonic()
+    before = _porcelain(wt)
     r = run_cmd(manifest["test_cmd"], str(wt), timeout=timeout)
-    ok_c = r["rc"] == 0
-    checks["c"] = _check(ok=ok_c, rc=r["rc"], duration_ms=_ms(c_t0), out=r["out"],
-                         detail="full suite green with gold" if ok_c
-                         else f"full suite failed with gold applied (rc={r['rc']})")
+    after = _porcelain(wt)
+    ok_c = r["rc"] == 0 and before == after
+    checks["c"] = _check(
+        ok=ok_c, rc=r["rc"], duration_ms=_ms(c_t0), out=r["out"],
+        detail=("full suite green with gold" if ok_c
+                else (f"full suite failed with gold applied (rc={r['rc']})"
+                      if r["rc"] != 0
+                      else "suite mutated the worktree (tracked files changed "
+                           "during the run)")))
     _restore(wt)
 
     return _verdict(checks, started, run_id, ticket, repro_name)
 
 
-def _a_detail(r: dict, ticket: dict) -> str:
-    if r["rc"] == 0:
-        return "repro test PASSED on buggy code (rc=0) — must fail"
-    return (f"failed (rc={r['rc']}) but symptom "
-            f"'{ticket['symptom']}' not found in output")
+def _a_detail(ok: bool, r: dict, ticket: dict) -> str:
+    if not ok:
+        if r["rc"] == 0:
+            return "repro test PASSED on buggy code (rc=0) — must fail"
+        return (f"failed (rc={r['rc']}) but symptom "
+                f"'{ticket['symptom']}' not found in output")
+    return (f"repro test FAILED (rc={r['rc']}) with symptom "
+            f"'{ticket['symptom']}' present in output")
 
 
 def _check(ok: bool, rc: int | None, duration_ms: int, out: str, detail: str) -> dict:
@@ -162,9 +174,33 @@ def _ms(t0: float) -> int:
     return int(round((time.monotonic() - t0) * 1000))
 
 
+def _porcelain(wt: Path) -> list[str]:
+    """git status --porcelain, excluding untracked-only noise (pycache, etc.).
+
+    Flags tracked-file changes (modified/staged/deleted/renamed) — the
+    tampering vector — while ignoring fresh untracked files that test runs
+    legitimately create (e.g. pytest __pycache__).
+    """
+    r = run_cmd("git status --porcelain", str(wt), timeout=30)
+    out = []
+    for line in r["out"].splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("??"):
+            continue
+        out.append(line)
+    return out
+
+
 def _restore(wt: Path) -> None:
-    """Put the worktree back to a pristine checkout (best-effort)."""
-    run_cmd("git checkout . && git clean -fd", str(wt), timeout=120)
+    """Put the worktree back to a pristine checkout (best-effort).
+
+    reset --hard (not checkout .) so STAGED modifications are reverted too —
+    a repro test could otherwise stage a rewritten fixture test and survive
+    the restore (observed in the wild).
+    """
+    run_cmd("git reset --hard HEAD && git clean -fd", str(wt), timeout=120)
 
 
 def _verdict(checks: dict, started: float, run_id: str, ticket: dict,
