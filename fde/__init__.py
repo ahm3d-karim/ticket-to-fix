@@ -1,0 +1,3 @@
+"""fde — ticket-to-fix pipeline CLI."""
+
+__version__ = "0.1.0"

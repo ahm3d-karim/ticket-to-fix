@@ -1,0 +1,4 @@
+runs/
+fixtures/*/.git/
+demo-app/.git/
+__pycache__/
