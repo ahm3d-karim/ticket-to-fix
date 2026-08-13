@@ -119,15 +119,7 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
         _restore_guarded(wt, baseline_head)
         return _verdict(checks, started, run_id, ticket, repro_name)
     b_t0 = time.monotonic()
-    apply_r = run_cmd(
-        f"git -C {shlex.quote(str(wt))} apply {shlex.quote(str(gold))}",
-        str(wt), timeout=timeout)
-    if apply_r["rc"] != 0:
-        # Windows CRLF tolerance: retry once ignoring whitespace differences
-        apply_r = run_cmd(
-            f"git -C {shlex.quote(str(wt))} apply --ignore-whitespace "
-            f"{shlex.quote(str(gold))}",
-            str(wt), timeout=timeout)
+    apply_r = _apply_gold(wt, gold, timeout)
     r = run_cmd(test_one, str(wt), timeout=timeout)
     ok_b = apply_r["rc"] == 0 and r["rc"] == 0
     detail = ("git apply failed" if apply_r["rc"] != 0
@@ -149,6 +141,15 @@ def verify_repro(repo: str, worktree: str, manifest: dict, ticket: dict,
         (wt / repro_name).unlink()
     except OSError:
         pass
+    # _restore_guarded after state B reverted the gold patch — re-apply it:
+    # state C must run the suite against the FIXED tree, not the buggy one
+    # (observed in the wild: 3/3 repro attempts spuriously rejected).
+    apply_c = _apply_gold(wt, gold, timeout)
+    if apply_c["rc"] != 0:
+        checks["c"] = _check(False, apply_c["rc"], _ms(c_t0), apply_c["out"],
+                             detail="gold.patch failed to apply for state C")
+        _restore_guarded(wt, baseline_head)
+        return _verdict(checks, started, run_id, ticket, repro_name)
     before = _porcelain(wt)
     r = run_cmd(manifest["test_cmd"], str(wt), timeout=timeout)
     after = _porcelain(wt)
@@ -188,6 +189,20 @@ def _ms(t0: float) -> int:
 def _head(wt: Path) -> str:
     r = run_cmd("git rev-parse HEAD", str(wt), timeout=30)
     return r["out"].strip()
+
+
+def _apply_gold(wt: Path, gold: Path, timeout: int = 120) -> dict:
+    """git apply gold.patch into the worktree (CRLF-tolerant retry)."""
+    apply_r = run_cmd(
+        f"git -C {shlex.quote(str(wt))} apply {shlex.quote(str(gold))}",
+        str(wt), timeout=timeout)
+    if apply_r["rc"] != 0:
+        # Windows CRLF tolerance: retry once ignoring whitespace differences
+        apply_r = run_cmd(
+            f"git -C {shlex.quote(str(wt))} apply --ignore-whitespace "
+            f"{shlex.quote(str(gold))}",
+            str(wt), timeout=timeout)
+    return apply_r
 
 
 def _porcelain(wt: Path) -> list[str]:

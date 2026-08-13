@@ -30,6 +30,13 @@ SUITE_TEST = (
     "test('total sanity', () => { assert.equal(typeof total, 'function'); });\n"
 )
 
+STRICT_SUITE_TEST = (
+    "const test = require('node:test');\n"
+    "const assert = require('node:assert');\n"
+    "const { total } = require('../calc.js');\n"
+    "test('total applies 5% tax', () => { assert.equal(total(10, 3), 31.5); });\n"
+)
+
 GOOD_REPRO = (
     "const test = require('node:test');\n"
     "const assert = require('node:assert');\n"
@@ -85,29 +92,47 @@ def make_gold_patch(repo: Path, fixed_source: str) -> Path:
     return repo / "gold.patch"
 
 
+def _build_repo(repo: Path, suite_source: str) -> None:
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    # keep line endings LF so git apply of LF patches is deterministic
+    (repo / ".gitattributes").write_text("* -text\n", encoding="utf-8")
+    (repo / "calc.js").write_text(BUGGY, encoding="utf-8")
+    (repo / "test").mkdir()
+    (repo / "test" / "total.test.js").write_text(suite_source, encoding="utf-8")
+    (repo / "fde.yaml").write_text(
+        "install_cmd: ''\n"
+        "test_cmd: 'node --test'\n"
+        "run_cmd: 'node -e \"console.log(require(''./calc.js'').total(10,3))\"'\n"
+        "app_type: js\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "init")
+
+
 @pytest.fixture
 def buggy_repo():
     """Mini tier-1 scratch repo (buggy main) under tests/scratch_repos/."""
     repo = SCRATCH / f"harness_repo_{uuid.uuid4().hex[:8]}"
     repo.mkdir(parents=True)
     try:
-        _git(repo, "init", "-q", "-b", "main")
-        _git(repo, "config", "user.email", "test@example.com")
-        _git(repo, "config", "user.name", "Test")
-        # keep line endings LF so git apply of LF patches is deterministic
-        (repo / ".gitattributes").write_text("* -text\n", encoding="utf-8")
-        (repo / "calc.js").write_text(BUGGY, encoding="utf-8")
-        (repo / "test").mkdir()
-        (repo / "test" / "total.test.js").write_text(SUITE_TEST, encoding="utf-8")
-        (repo / "fde.yaml").write_text(
-            "install_cmd: ''\n"
-            "test_cmd: 'node --test'\n"
-            "run_cmd: 'node -e \"console.log(require(''./calc.js'').total(10,3))\"'\n"
-            "app_type: js\n",
-            encoding="utf-8",
-        )
-        _git(repo, "add", ".")
-        _git(repo, "commit", "-qm", "init")
+        _build_repo(repo, SUITE_TEST)
+        yield repo
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
+
+@pytest.fixture
+def strict_buggy_repo():
+    """Same mini repo, but the suite test asserts the FIXED value — it fails on
+    buggy code and passes only with gold applied. Regression for the
+    state-C-without-gold bug (tier2 case): a good repro test must still pass."""
+    repo = SCRATCH / f"harness_strict_{uuid.uuid4().hex[:8]}"
+    repo.mkdir(parents=True)
+    try:
+        _build_repo(repo, STRICT_SUITE_TEST)
         yield repo
     finally:
         shutil.rmtree(repo, ignore_errors=True)
@@ -187,6 +212,25 @@ def test_verify_repro_good_repro_test_passes(buggy_repo, harness_run):
     assert v["checks"]["b"]["ok"] is True   # passes with gold applied
     assert v["checks"]["c"]["ok"] is True   # full suite green with gold
     # worktree restored after B/C: no state-A poisoning
+    st = run_cmd("git status --porcelain", wt)
+    assert st["out"].strip() == ""
+
+
+def test_verify_repro_state_c_runs_suite_with_gold(strict_buggy_repo, harness_run):
+    """Regression: the strict suite FAILS on buggy code — state C must run it
+    with gold re-applied (the state-B restore reverts gold), or a good repro
+    test is spuriously rejected. This is the tier2 failure observed in the
+    wild: 3/3 attempts rejected with 'full suite failed with gold applied'."""
+    make_gold_patch(strict_buggy_repo, FIXED)
+    run_id = "test-harness-goldc"
+    wt, repro = harness_run(run_id, GOOD_REPRO)
+
+    v = verify_repro(str(strict_buggy_repo), wt, MANIFEST, TICKET, repro)
+
+    assert v["pass"] is True
+    assert v["checks"]["a"]["ok"] is True
+    assert v["checks"]["b"]["ok"] is True
+    assert v["checks"]["c"]["ok"] is True
     st = run_cmd("git status --porcelain", wt)
     assert st["out"].strip() == ""
 
