@@ -14,6 +14,7 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -21,11 +22,16 @@ from .config import load_repo_manifest
 from .harness import run_cmd, verify_repro
 from .runlog import append, run_dir
 
-BACKEND = "codex"
+BACKEND = os.environ.get("FDE_AGENT_BACKEND", "codex")
 REPRO_ATTEMPTS = 3
 FIX_ROUNDS = 8
 ROUND_TIMEOUT = 900
 REPRO_FILES = {"js": "repro.test.js", "py": "repro_test.py"}
+
+
+class AgentAuthError(Exception):
+    """The model provider rejected the API key (401). Raised so the failure
+    surfaces as 'agent auth failed', never as a harness rejection."""
 
 
 def codex_version() -> str:
@@ -80,7 +86,12 @@ def _prompt_path(p: Path) -> str:
 
 
 def _last_message(out: str) -> str:
-    """Extract the last assistant text from `codex exec --json` JSONL output."""
+    """Extract the last assistant text from `codex exec --json` JSONL output.
+
+    Handles two observed shapes: top-level chat/agent_message events with
+    payload.message.content, and item.completed events whose item is an
+    agent_message with item.text (codex 0.147's actual format).
+    """
     last = ""
     for line in out.splitlines():
         try:
@@ -89,20 +100,26 @@ def _last_message(out: str) -> str:
             continue
         if not isinstance(obj, dict):
             continue
+        text = None
         t = obj.get("type", "")
-        if t not in ("chat_message", "agent_message", "message"):
-            continue
-        payload = obj.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        msg = payload.get("message") if isinstance(payload.get("message"), dict) else payload
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                c.get("text", "") for c in content
-                if isinstance(c, dict) and c.get("type") == "text")
-        if isinstance(content, str) and content.strip():
-            last = content.strip()
+        if t == "item.completed" and isinstance(obj.get("item"), dict):
+            item = obj["item"]
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                text = item["text"]
+        elif t in ("chat_message", "agent_message"):
+            payload = obj.get("payload")
+            if isinstance(payload, dict):
+                msg = (payload.get("message")
+                       if isinstance(payload.get("message"), dict) else payload)
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    text = " ".join(
+                        c.get("text", "") for c in content
+                        if isinstance(c, dict) and c.get("type") == "text")
+                elif isinstance(content, str):
+                    text = content
+        if text and text.strip():
+            last = text.strip()
     return last
 
 
@@ -114,25 +131,59 @@ def codex_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     exec with `danger-full-access`; containment for the pipeline comes from the
     design, not the sandbox: cwd is the run's git worktree, the worktree is
     reset between fix rounds, and the 3-state harness gates every result.
+
+    Watchdog note: `subprocess.run(timeout=)` failed to fire twice on this
+    machine (codex's node wrapper outliving its child, process frozen for
+    hours). This implementation polls the process itself and tree-kills
+    (`taskkill /F /T`) on expiry — the timeout is guaranteed to fire.
     """
     t0 = time.monotonic()
     flags = ["codex", "exec", "--json", "-s", "danger-full-access", "-C", cwd, prompt]
     env = os.environ.copy()
     if "OPENCODE_GO_API_KEY" not in env:
         _bootstrap_env(env)
-    try:
-        r = subprocess.run(flags, capture_output=True, text=True, timeout=timeout,
-                           env=env,
-                           creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-        out = (r.stdout or "") + (r.stderr or "")
-        return {"rc": r.returncode, "out": out, "timed_out": False,
-                "summary": _last_message(out),
-                "duration_ms": int((time.monotonic() - t0) * 1000)}
-    except subprocess.TimeoutExpired as e:
-        out = (e.stdout or "") + (e.stderr or "")
-        return {"rc": -1, "out": out, "timed_out": True,
-                "summary": _last_message(out),
-                "duration_ms": int((time.monotonic() - t0) * 1000)}
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    proc = subprocess.Popen(flags, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            env=env, creationflags=creationflags)
+    chunks: list[str] = []
+
+    def _reader():
+        try:
+            for line in proc.stdout:
+                chunks.append(line)
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while proc.poll() is None:
+        if time.monotonic() > deadline:
+            timed_out = True
+            _kill_proc_tree(proc.pid)
+            break
+        time.sleep(1)
+    if proc.poll() is None:
+        proc.wait(timeout=30)
+    reader.join(timeout=5)
+    out = "".join(chunks)
+    if proc.returncode != 0 and ("401" in out or "Unauthorized" in out
+                                 or "Missing bearer" in out):
+        raise AgentAuthError(
+            "agent auth failed (401 from the model provider) — set the API "
+            "key in the environment or FDE_AGENT_ENV_FILE (see README "
+            "'Bring your own key')")
+    return {"rc": proc.returncode, "out": out, "timed_out": timed_out,
+            "summary": _last_message(out),
+            "duration_ms": int((time.monotonic() - t0) * 1000)}
+
+
+def _kill_proc_tree(pid: int) -> None:
+    """Kill the process tree (taskkill /T catches the node wrapper's children)."""
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                   capture_output=True, text=True)
 
 
 def _repro_prompt(ticket: dict, manifest: dict, repro_path: Path,
