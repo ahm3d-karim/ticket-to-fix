@@ -1,0 +1,11 @@
+diff --git a/server.js b/server.js
+index 9a4ce91..b50ff50 100644
+--- a/server.js
++++ b/server.js
+@@ -1,5 +1,5 @@
+ const http = require("http");
+-const TAX_RATE = 0.15;                       // BUG: ignores ./config.json (0.18)
++const { TAX_RATE } = require("./config.json");
+ http.createServer((req, res) => {
+   const u = new URL(req.url, "http://x");
+   if (u.pathname === "/tax") {
