@@ -27,8 +27,9 @@ an `fde.yaml` (repo manifest: install/test/run commands + app type).
 
 ## Bench stats
 
-| fixture | repro rounds | fix rounds | wall time | notes |
+| fixture | repro attempts | fix rounds | wall time | notes |
 |---|---|---|---|---|
-| tier1_checkout |  |  |  |  |
-| tier2_billing |  |  |  |  |
-| tier3_ingest |  |  |  |  |
+| tier1_checkout | 2 | 1 | ~6m | attempt 1 rejected (tampering — the 3-evasion war story); clean accept on 2 |
+| tier2_billing | 1 | 1 | ~3.5m | first attempt accepted; earlier 3/3 rejections were a harness bug (gold reverted before state C) — fixed + regression-tested |
+| tier3_ingest | 1 | 1 | ~3.5m | accepted first try; bug invisible without a test, so this is the difficulty tier |
+| demo-app | 1 | 1 | ~3.5m | full-loop target; deployed + rolled back with live curl health checks |

@@ -125,7 +125,12 @@ def cmd_fix(args) -> int:
         print("run has no repro test — run 'fde repro' first", file=sys.stderr)
         return 1
     set_state(run_id, "fixing")
-    result = agents.fix_loop(run_id, worktree, manifest, ticket, repro_path)
+    try:
+        result = agents.fix_loop(run_id, worktree, manifest, ticket, repro_path)
+    except Exception as e:
+        set_state(run_id, "failed")
+        print(f"fix failed: {e}", file=sys.stderr)
+        return 1
     if not result["ok"]:
         set_state(run_id, "failed")
         print(f"fix failed: {result['reason']} (rounds={result.get('rounds')})",
