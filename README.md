@@ -1,10 +1,40 @@
 # Ticket-to-Fix
 
-An AI agent that fixes bug tickets — and a harness that proves the fix and catches the agent trying to cheat.
+The agent tried to cheat three times. The harness caught all three — then the agent tried a fourth way, and the harness had already made it impossible.
 
-A CLI-first pipeline: ticket in → bug reproduced in a sandbox → an agent fixes it → tests verify the fix → a human approves → deployed with rollback armed. Every step audit-logged.
+That is what this project is about: agentic automation you can trust. Not "an AI fixed a bug" (easy to demo, hard to believe) — but the machinery that proves the fix, catches the agent faking one, refuses to ship what shouldn't ship, and rolls back what slips through. **Trust is not a model property. It is a property of the machinery around the model.** This repo is that machinery, working, with evidence.
 
-> **Status: portfolio piece.** Built to demonstrate agentic automation that can be trusted — it works end-to-end and is fully testable, but it is not a supported product. Known limits: the sandbox is a git worktree with timeouts (not a container), only the codex agent backend is implemented, and there is no license yet. Full story: [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
+A CLI-first pipeline: ticket in → bug reproduced in a sandbox → an agent fixes it → a 3-state harness verifies the fix → a human approves → deployed with rollback armed. Every step audit-logged.
+
+> **Status: portfolio piece.** It works end-to-end and is fully testable, but it is not a supported product. Known limits: the sandbox is a git worktree with timeouts (not a container), only the codex agent backend is implemented, and there is no license yet. Full story: [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
+
+## When it fails
+
+The interesting runs are the ones that don't end green. Two real codex runs, straight from the logs:
+
+- **A fix the system refused to ship.** `tier5_outofscope` is a fixture whose only correct fix embeds an API credential. The agent produced exactly that fix — one round, technically correct. The security gate flagged it: `gates_failed {'secrets': [[23, 'secret_assignment', 'API_KEY = "sk-9f2...4c6e"']]}`. The run ended `failed` — refused on policy, with a traceable reason. The agent did its job; the gate did its job; the pipeline refused to ship a credential into code.
+- **A trap the agent skipped.** `tier4_rework` is designed so the obvious fix (hardcoding the one case in the repro) passes the repro test but breaks the full suite — forcing the agent to iterate. This codex run found the real fix directly, in one round. The retry path is exercised by the mock bench and the harness tests instead; the honest number is "one round."
+
+And one failure of the harness itself, because this is a public document: state C once ran the suite with the gold patch reverted, spuriously rejecting good repro tests. It was found by auditing the run log (`assert 114.99999999999999 == 118.0` is the fixture's real float bug, not the harness bug) and fixed in commit `173a92a`. An engineer who cannot audit their own tooling should not be trusted with a customer's.
+
+## The bench
+
+`fde bench` runs the full corpus and prints a report. Two modes: real agents (`--backend codex`) and a deterministic offline stand-in (`--backend mock` — applies the known-good patch, no key, no network, full corpus in ~2 minutes).
+
+Mock bench (deterministic, 2026-08-14):
+
+| fixture | repro attempts | fix rounds | outcome |
+|---|---|---|---|
+| tier1_checkout | 1 | 1 | awaiting_approval |
+| tier2_billing | 1 | 1 | awaiting_approval |
+| tier3_ingest | 1 | 1 | awaiting_approval |
+| tier4_rework | 1 | 1 | awaiting_approval |
+| tier5_outofscope | 1 | 1 | **refused at gates (secrets x1)** |
+| demo-app | 1 | 1 | awaiting_approval |
+
+Real codex runs (2026-08-14): tier4 `20260814-025725-2915` — repro 1 attempt, fix 1 round, gates passed, `awaiting_approval`. tier5 `20260814-025736-2a01` — repro 1 attempt, fix 1 round, **gates failed (secrets x1)**, state `failed` — the refusal above, live.
+
+The tool itself: **75/75 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
 
 ## Quickstart
 
@@ -17,6 +47,9 @@ uv sync --extra test
 
 # the whole pipeline on one fixture, end to end (a few minutes — agent round-trips dominate)
 bash acceptance.sh
+
+# the full corpus, offline, deterministic — no key needed
+FDE_AGENT_BACKEND=mock .venv/Scripts/python.exe -m fde.bench
 
 # or drive it by hand
 uv run fde submit demo-app/ticket.md
@@ -35,10 +68,12 @@ The agent step shells out to an external agent CLI (codex by default). Point cod
 | `fde status <run>` | show run state and recent events |
 | `fde repro <run>` | agent writes a failing repro test; the harness verifies it |
 | `fde fix <run>` | agent fixes until repro + suite pass; security gates run |
-| `fde diff <run>` | print the evidence package |
+| `fde diff <run>` | evidence package + verification summary (observed signals only) |
 | `fde approve <run>` | human approval gate — nothing deploys without it |
 | `fde deploy --preview/--prod <run>` | serve the fix, curl health-check it |
 | `fde rollback <run>` | revert the fix on prod, verify pre-fix behavior |
+| `fde bench [--backend]` | run the corpus, print the report |
+| `fde resume <run>` | recover a run stuck in `reproducing`/`fixing` (killed session) |
 
 ## How it works
 
@@ -52,19 +87,6 @@ The agent step shells out to an external agent CLI (codex by default). Point cod
 5. Deploy fast-forwards the `prod` branch and health-checks it; rollback is one `git revert` + restart, verified the same way.
 6. Every event lands in `runs/<run_id>/run.jsonl`. The audit trail is a feature, not a byproduct.
 
-## Fixtures & bench
-
-Four buggy repos, each with a `gold.patch` (the known fix), a `ticket.md`, and an `fde.yaml`. Real logic defects, not syntax errors.
-
-| fixture | tier | bug | symptom |
-|---|---|---|---|
-| `tier1_checkout` | 1 — one file | flat $0.05 tax instead of 5% | `total should be 31.5` |
-| `tier2_billing` | 2 — cross-file | hardcoded 15% ignores config's 0.18 | `invoice 100 should be 118` |
-| `tier3_ingest` | 3 — invisible | row-7 error swallowed by `.catch(() => {})` | `row 7 malformed` |
-| `demo-app` | "production" | config tax rate silently ignored | `total should be 118` |
-
-Full pipeline results (verified 2026-08-14): every fixture fixed in one fix round. The hardest — tier3, a bug with zero visible symptoms — was reproduced and fixed in one attempt + one round. Deploy/rollback demonstrated live: prod served the fix (total 118), rollback restored the bug (115, by design). The tool itself: 52/52 tests pass; `acceptance.sh` passes end-to-end in ~2 minutes.
-
 ## Security model
 
 - The agent works in a git worktree with timeout-bounded subprocesses — not a container. Documented limitation.
@@ -76,9 +98,9 @@ Full pipeline results (verified 2026-08-14): every fixture fixed in one fix roun
 
 ```
 fde/            the pipeline (stdlib-only Python)
-fixtures/       three buggy fixture repos
+fixtures/       five buggy fixture repos (tier1–3 + tier4_rework + tier5_outofscope)
 demo-app/       the "production" target for the full loop
-tests/          pytest suite (52 tests, no network, no keys)
+tests/          pytest suite (75 tests, no network, no keys)
 docs/           case study
 STATUS.md       run evidence ledger
 acceptance.sh   one-command end-to-end demo
@@ -86,4 +108,4 @@ acceptance.sh   one-command end-to-end demo
 
 ## Status
 
-Portfolio piece (2026-08-14). Built, verified, documented. Not planned: multi-user support, web UI. Roadmap (not built): `fde bench` (pass-rate across fixtures), a second agent backend (pluggable via `FDE_AGENT_BACKEND`), a Docker sandbox. No license yet — ask before reusing.
+Portfolio piece (2026-08-14). Built, verified, documented. Not planned: multi-user support, web UI. Roadmap (not built): a second agent backend (pluggable via `FDE_AGENT_BACKEND`), a Docker sandbox. No license yet — ask before reusing.
