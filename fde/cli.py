@@ -455,7 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench = sub.add_parser("bench", help="run the fixture corpus and render a report")
     p_bench.add_argument("--backend",
                          default=os.environ.get("FDE_AGENT_BACKEND", "codex"),
-                         help="agent backend: codex (default) or mock")
+                         help="agent backend: codex (default), mock, or claude")
     p_bench.add_argument("--fixture", action="append", dest="fixtures", metavar="NAME",
                          help="restrict to a fixture dir name (repeatable)")
 
