@@ -65,13 +65,12 @@ row-7 errors with zero visible wrong output. That's the strongest bench result.
 ## Verification commands for any agent
 
 ```bash
-cd "C:/Users/Ahmad Karim/Documents/fde/ticket-to-fix"
-PY=.venv/Scripts/python.exe
-$PY -m fde.cli status 20260813-183156-c96e   # tier2
-$PY -m fde.cli status 20260813-183354-0bf0   # tier3
-$PY -m fde.cli status 20260813-183644-139e   # demo-app (rolled_back)
-cat runs/_chain2.log                          # full chain transcript
-cd demo-app && git log --oneline prod -5      # deploy/revert evidence
+cd ticket-to-fix
+uv run fde status 20260813-183156-c96e   # tier2
+uv run fde status 20260813-183354-0bf0   # tier3
+uv run fde status 20260813-183644-139e   # demo-app (rolled_back)
+cat runs/_chain2.log                     # full chain transcript
+cd demo-app && git log --oneline prod -5 # deploy/revert evidence
 ```
 
 Harness 3-state check semantics: A = repro test fails on buggy code with

@@ -108,13 +108,12 @@ The pipeline ran on Windows against real agent processes. The failures were as i
 
 ```bash
 cd ticket-to-fix
-PY=.venv/Scripts/python.exe
-$PY -m pytest -q -x                          # 52 passed at HEAD
-$PY -m fde.cli status 20260813-183354-0bf0   # tier3 (awaiting_approval)
-$PY -m fde.cli status 20260813-183644-139e   # demo-app (rolled_back)
-cat runs/_chain2.log                         # full chain transcript
-git -C demo-app log --oneline prod -5        # deploy/revert evidence
-bash acceptance.sh                           # the full loop, live
+uv run pytest -q -x                        # 75 tests at HEAD
+uv run fde status 20260813-183354-0bf0     # tier3 (awaiting_approval)
+uv run fde status 20260813-183644-139e     # demo-app (rolled_back)
+cat runs/_chain2.log                       # full chain transcript
+git -C demo-app log --oneline prod -5      # deploy/revert evidence
+bash acceptance.sh                         # the full loop, live
 ```
 
 ---

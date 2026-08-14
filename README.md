@@ -6,7 +6,7 @@ That is what this project is about: agentic automation you can trust. Not "an AI
 
 A CLI-first pipeline: ticket in → bug reproduced in a sandbox → an agent fixes it → a 3-state harness verifies the fix → a human approves → deployed with rollback armed. Every step audit-logged.
 
-> **Status: portfolio piece.** It works end-to-end and is fully testable, but it is not a supported product. Known limits: the sandbox is a git worktree with timeouts (not a container), only the codex agent backend is implemented, and there is no license yet. Full story: [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
+> **Status: portfolio piece.** It works end-to-end and is fully testable, but it is not a supported product. Known limits: the sandbox is a git worktree with timeouts (not a container) and only the codex agent backend is implemented. Full story: [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
 
 ## When it fails
 
@@ -17,7 +17,7 @@ The interesting runs are the ones that don't end green. Two real codex runs, str
 
 And one failure of the harness itself, because this is a public document: state C once ran the suite with the gold patch reverted, spuriously rejecting good repro tests. It was found by auditing the run log (`assert 114.99999999999999 == 118.0` is the fixture's real float bug, not the harness bug) and fixed in commit `173a92a`. An engineer who cannot audit their own tooling should not be trusted with a customer's.
 
-## The bench
+## fde bench
 
 `fde bench` runs the full corpus and prints a report. Two modes: real agents (`--backend codex`) and a deterministic offline stand-in (`--backend mock` — applies the known-good patch, no key, no network, full corpus in ~2 minutes).
 
@@ -49,7 +49,7 @@ uv sync --extra test
 bash acceptance.sh
 
 # the full corpus, offline, deterministic — no key needed
-FDE_AGENT_BACKEND=mock .venv/Scripts/python.exe -m fde.bench
+FDE_AGENT_BACKEND=mock uv run fde bench
 
 # or drive it by hand
 uv run fde submit demo-app/ticket.md
@@ -72,8 +72,9 @@ The agent step shells out to an external agent CLI (codex by default). Point cod
 | `fde approve <run>` | human approval gate — nothing deploys without it |
 | `fde deploy --preview/--prod <run>` | serve the fix, curl health-check it |
 | `fde rollback <run>` | revert the fix on prod, verify pre-fix behavior |
-| `fde bench [--backend]` | run the corpus, print the report |
 | `fde resume <run>` | recover a run stuck in `reproducing`/`fixing` (killed session) |
+
+`fde bench` has its own section — [jump to it](#fde-bench).
 
 ## How it works
 
@@ -108,4 +109,8 @@ acceptance.sh   one-command end-to-end demo
 
 ## Status
 
-Portfolio piece (2026-08-14). Built, verified, documented. Not planned: multi-user support, web UI. Roadmap (not built): a second agent backend (pluggable via `FDE_AGENT_BACKEND`), a Docker sandbox. No license yet — ask before reusing.
+Portfolio piece (2026-08-14). Built, verified, documented. Not planned: multi-user support, web UI. Roadmap (not built): a second agent backend (pluggable via `FDE_AGENT_BACKEND`), a Docker sandbox. MIT licensed — see [LICENSE](LICENSE).
+
+## License
+
+[MIT](LICENSE) — Copyright (c) 2026 Ahmad Karim. Reuse freely; the harness's adversarial design is the point, and it is public on purpose.
