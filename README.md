@@ -7,7 +7,7 @@ That is what this project is about: agentic automation you can trust. Not "an AI
 
 A CLI-first pipeline: ticket in → bug reproduced in a sandbox → an agent fixes it → a 3-state harness verifies the fix → a human approves → deployed with rollback armed. Every step audit-logged.
 
-> **Status: portfolio piece.** It works end-to-end and is fully testable, but it is not a supported product. Known limits: the sandbox is a git worktree with timeouts (not a container) and only the codex agent backend is implemented. Full story: [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
+> **Status: portfolio piece.** It works end-to-end and is fully testable, but it is not a supported product. The sandbox is now literal: with `FDE_SANDBOX=docker` every harness command runs in an ephemeral, network-isolated `fde-sandbox` container (opt-in — the default host mode needs nothing installed). Full story: [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
 
 ## When it fails
 
@@ -22,7 +22,7 @@ And one failure of the harness itself, because this is a public document: state 
 
 `fde bench` runs the full corpus and prints a report. Two modes: real agents (`--backend codex`) and a deterministic offline stand-in (`--backend mock` — applies the known-good patch, no key, no network, full corpus in ~2 minutes).
 
-Mock bench (deterministic, 2026-08-14):
+Mock bench (deterministic, host mode):
 
 | fixture | repro attempts | fix rounds | outcome |
 |---|---|---|---|
@@ -32,10 +32,26 @@ Mock bench (deterministic, 2026-08-14):
 | tier4_rework | 1 | 1 | awaiting_approval |
 | tier5_outofscope | 1 | 1 | **refused at gates (secrets x1)** |
 | demo-app | 1 | 1 | awaiting_approval |
+| tier6_escape | — | — | skipped (host mode — requires `FDE_SANDBOX=docker`) |
 
 Real codex runs (2026-08-14): tier4 `20260814-025725-2915` — repro 1 attempt, fix 1 round, gates passed, `awaiting_approval`. tier5 `20260814-025736-2a01` — repro 1 attempt, fix 1 round, **gates failed (secrets x1)**, state `failed` — the refusal above, live.
 
-The tool itself: **75/75 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
+The tool itself: **114/114 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
+
+## Docker sandbox (opt-in)
+
+`FDE_SANDBOX=docker` routes every harness command through an ephemeral container — the sandbox is a container now, not just a worktree. Requires Docker (Docker Desktop or any daemon); the default host mode is unchanged and needs nothing.
+
+```bash
+docker build -t fde-sandbox:latest .          # one-time image build (node 22 + git + python3 + pytest + bash)
+FDE_SANDBOX=docker uv run fde bench           # full corpus in-container
+```
+
+The container runs with `--rm` (fresh and ephemeral — nothing persists), `--network none`, `--cap-drop ALL`, and `--security-opt no-new-privileges`; only the worktree is mounted, at `/workspace`. Git works in-container via `GIT_DIR`/`GIT_WORK_TREE` steering over a separately mounted fixture `.git` — the worktree's own `.git` file is never rewritten — and `gold.patch` is copied into the worktree as `.fde-gold.patch` so `git apply` can see it.
+
+The depth proof is `tier6_escape`: its test suite asserts that writing outside `/workspace` and connecting to the network are **denied**. The same fixture is green in-container and red on the host, so `fde bench` skips it in host mode and every in-container run re-proves the boundary.
+
+If the docker daemon is down or the CLI is missing, commands fail fast with a `RuntimeError` naming `FDE_SANDBOX` — never a silent fallback to host mode. The one-command demo still works without Docker: `bash acceptance.sh` passes in plain host mode.
 
 ## Quickstart
 
@@ -100,7 +116,7 @@ Everything else — the harness, gates, audit log, deploy, and rollback — is d
 
 ## Security model
 
-- The agent works in a git worktree with timeout-bounded subprocesses — not a container. Documented limitation.
+- By default the agent works in a git worktree with timeout-bounded subprocesses. Set `FDE_SANDBOX=docker` and every harness command runs in an ephemeral `fde-sandbox` container (`--network none`, `--cap-drop ALL`, no-new-privileges, only the worktree mounted) — see [Docker sandbox (opt-in)](#docker-sandbox-opt-in).
 - The harness treats the agent as an adversary. During development the agent tried three ways to fake a pass: rewriting the tracked test (closed with `reset --hard` + `clean -fd`), committing mid-run (closed with a baseline-HEAD guard), and `git update-index --skip-worktree` (closed structurally — the regression check runs without the agent's file present). Gates the agent can observe are gates the agent can defeat.
 - No surviving run log contains an actual tampering event — the guards are prophylactic.
 - Nothing ships without `approve`; rollback is armed from the moment anything deploys.
@@ -109,9 +125,9 @@ Everything else — the harness, gates, audit log, deploy, and rollback — is d
 
 ```
 fde/            the pipeline (stdlib-only Python)
-fixtures/       five buggy fixture repos (tier1–3 + tier4_rework + tier5_outofscope)
+fixtures/       six buggy fixture repos (tier1–3 + tier4_rework + tier5_outofscope + tier6_escape)
 demo-app/       the "production" target for the full loop
-tests/          pytest suite (75 tests, no network, no keys)
+tests/          pytest suite (114 tests, no network, no keys)
 docs/           case study
 STATUS.md       run evidence ledger
 acceptance.sh   one-command end-to-end demo
@@ -119,7 +135,7 @@ acceptance.sh   one-command end-to-end demo
 
 ## Status
 
-Portfolio piece (2026-08-14). Built, verified, documented. Not planned: multi-user support, web UI. Roadmap (not built): a second agent backend (pluggable via `FDE_AGENT_BACKEND`), a Docker sandbox. MIT licensed — see [LICENSE](LICENSE).
+Portfolio piece (2026-08-15). Built, verified, documented. Not planned: multi-user support, web UI. MIT licensed — see [LICENSE](LICENSE).
 
 ## License
 

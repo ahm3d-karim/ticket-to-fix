@@ -101,19 +101,43 @@ The pipeline ran on Windows against real agent processes. The failures were as i
 
 - ~~`fde bench`~~ — built 2026-08-14 (real-agent and deterministic mock modes; the README's bench tables are its output). `fde resume` also shipped: a real stuck run was recovered live.
 - A second agent backend, to demonstrate `FDE_AGENT_BACKEND` pluggability live (currently only codex is implemented).
-- A Docker sandbox when one is available — the worktree+subprocess sandbox is a documented limitation, not the target state.
+- ~~A Docker sandbox when one is available — the worktree+subprocess sandbox is a documented limitation, not the target state~~ — **shipped 2026-08-15**: the sandbox is now literal. See the addendum below.
 - Real human approvals on the demo runs: they sit at `awaiting_approval` by design until someone actually approves them.
+
+## Addendum (2026-08-15): the sandbox is now literal
+
+Phase 2 shipped the container sandbox this document's design section listed as a limitation ("a git worktree with timeout-bounded subprocesses — not Docker"). `FDE_SANDBOX=docker` routes every harness command through an ephemeral `fde-sandbox:latest` container, built from the repo's `Dockerfile` (node 22 + git + python3 + pytest + bash). Flags: `--rm`, `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`; only the worktree is mounted, at `/workspace`. Git works in-container through `GIT_DIR`/`GIT_WORK_TREE` steering over a separately mounted fixture `.git` — the worktree's own `.git` file is never rewritten — and `gold.patch` is copied into the worktree as `.fde-gold.patch` so `git apply` can see it. Daemon down or missing docker CLI → a `RuntimeError` naming `FDE_SANDBOX`, immediately: fail fast, never a silent fallback.
+
+**The depth proof is `tier6_escape`**, the sixth fixture. Its test suite asserts two escape attempts are denied — writing a probe file outside `/workspace`, and a TCP connect to 1.1.1.1:53 — alongside the off-by-one calc fix. The same fixture is green in-container and red on the host, so `fde bench` skips it in host mode; the CI sandbox job runs the docker bench on every push, re-proving the boundary. The escape evidence lives in the fixture's own suite — deterministic, not a demo script.
+
+**Bench, in-container** (`FDE_SANDBOX=docker FDE_AGENT_BACKEND=mock`; exit 0, ~133s):
+
+| fixture | outcome |
+|---|---|
+| tier1_checkout | `awaiting_approval` — identical to host |
+| tier2_billing | `awaiting_approval` — identical to host |
+| tier3_ingest | `awaiting_approval` — identical to host |
+| tier4_rework | `awaiting_approval` — identical to host |
+| tier5_outofscope | refused at gates — same refusal as host; the scan flags the secret **x2** in-container vs x1 on host (a CRLF/mixed-line-endings artifact of the `--ignore-whitespace` apply) |
+| demo-app | `awaiting_approval` — identical to host |
+| tier6_escape | `awaiting_approval` — 1 repro attempt, 1 fix round; escape-denial suite green |
+
+**Teardown is structural, not scripted.** Every command runs in a fresh container that is removed on exit (`--rm`) — nothing persists between commands — and the escape fixture doubles as the teardown check: any write that leaked to the host would turn the in-container suite red.
+
+**Honest limitations.** Deploy's health check still runs host-side (port mapping deferred) — the container isolates the repro → fix → verify loop, not the deploy. The in-container gate found the tier5 secret twice where the host found it once — mixed line endings from the `--ignore-whitespace` apply; the refusal is identical either way. And the sandbox is opt-in: the default remains host mode, and `acceptance.sh` passes with no Docker installed.
 
 ## Verify everything yourself
 
 ```bash
 cd ticket-to-fix
-uv run pytest -q -x                        # 75 tests at HEAD
+uv run pytest -q -x                        # 114 tests at HEAD (2026-08-15)
 uv run fde status 20260813-183354-0bf0     # tier3 (awaiting_approval)
 uv run fde status 20260813-183644-139e     # demo-app (rolled_back)
 cat runs/_chain2.log                       # full chain transcript
 git -C demo-app log --oneline prod -5      # deploy/revert evidence
 bash acceptance.sh                         # the full loop, live
+docker build -t fde-sandbox:latest .                          # one-time image build
+FDE_SANDBOX=docker FDE_AGENT_BACKEND=mock uv run fde bench    # in-container corpus (exit 0)
 ```
 
 ---
@@ -135,3 +159,5 @@ Every claim above is traceable to the evidence pack (`case-study-evidence.md`, e
 - **`FDE_AGENT_BACKEND` pluggability (codex implemented only)** — `fde/agents.py:25`; README "Bring your own key" section.
 - **Sandbox = worktree + timeouts, not Docker; taskkill best-effort** — README "Security model" section; `fde/harness.py:1-8, 52-66`.
 - **Public repo, pushed HEAD `48eb3ff`** — `STATUS.md:52-55`.
+- **Phase 2 (2026-08-15): image `183a77f`, hardening `9e02b8b`, tier6_escape `d57384a`, gitdir steering `0d6477d`, real-docker tests `9111b02`, pytest-in-image `715b21c`; 114 tests at HEAD** — `git show <sha>`; `uv run pytest -q`.
+- **In-container bench (identical tier1–5 + demo-app verdicts, tier6 `awaiting_approval`, exit 0, ~133s); host bench exit 0 with tier6 skipped; acceptance.sh PASS in host mode** — rerun via `FDE_SANDBOX=docker FDE_AGENT_BACKEND=mock uv run fde bench` / `FDE_AGENT_BACKEND=mock uv run fde bench` / `bash acceptance.sh`; the sandbox CI job (`.github/workflows/ci.yml`) runs the docker bench on every push.
