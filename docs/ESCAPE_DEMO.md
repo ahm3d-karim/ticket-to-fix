@@ -22,9 +22,10 @@ runs inside an ephemeral `fde-sandbox` container instead of on the host:
   not reachable from inside the container.
 - `--rm` + teardown (`docker kill` on timeout, `docker rm -f` always) — the container is
   destroyed after every command. There is nothing to come back to.
-- The fixture's git directory is mounted read-only at `/fde/gitdir` and git is steered
-  there with `GIT_DIR` / `GIT_WORK_TREE`, so in-container git ops work without exposing
-  the fixture source tree.
+- The fixture's git directory is mounted at `/fde/gitdir` and git is steered
+  there with `GIT_DIR` / `GIT_WORK_TREE`, so in-container git ops work without
+  exposing the fixture source tree. It is writable (git apply/checkout write the
+  index there) but only exposes the fixture repo's git metadata, not the host.
 
 **Honest scope.** The Codex CLI itself is a host-side process (`fde` invokes
 `codex exec`); containment is at the layer that decides the verdict: every command the
