@@ -427,3 +427,50 @@ def test_sandbox_plain_dir_single_mount(tmp_path, monkeypatch):
     argv = _docker_argv(logs["args"])
     assert "--mount" not in argv
     assert argv.count("-v") == 1
+
+
+# --- Real-docker integration tests (skip when no daemon) -----------------
+
+def _docker_available() -> bool:
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _docker_available(),
+                    reason="docker daemon not reachable")
+def test_real_container_echo():
+    """The sandbox container actually runs commands (needs fde-sandbox:latest
+    built — see README 'Docker sandbox')."""
+    from fde.sandbox import run_in_docker
+    r = run_in_docker("echo container-ok", ".", 60)
+    assert r["rc"] == 0
+    assert "container-ok" in r["out"]
+
+
+@pytest.mark.skipif(not _docker_available(),
+                    reason="docker daemon not reachable")
+def test_real_container_local_write_ok():
+    """Inside the container /tmp is writable — the containment is about the
+    HOST, not the container's own filesystem."""
+    from fde.sandbox import run_in_docker
+    r = run_in_docker("touch /tmp/fde-probe && echo wrote", ".", 60)
+    assert r["rc"] == 0
+    assert "wrote" in r["out"]
+
+
+@pytest.mark.skipif(not _docker_available(),
+                    reason="docker daemon not reachable")
+def test_real_container_has_no_network():
+    """--network none: a TCP connect from inside the container must fail."""
+    from fde.sandbox import run_in_docker
+    code = ("require('net').connect(53,'1.1.1.1')"
+            ".on('error',()=>process.exit(0))"
+            ".on('connect',()=>process.exit(1))")
+    r = run_in_docker(f"node -e \"{code}\"", ".", 60)
+    assert r["rc"] == 0  # connect failed -> exited 0 via the error handler
