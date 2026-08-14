@@ -16,7 +16,7 @@ The interesting runs are the ones that don't end green. Two real codex runs, str
 - **A fix the system refused to ship.** `tier5_outofscope` is a fixture whose only correct fix embeds an API credential. The agent produced exactly that fix — one round, technically correct. The security gate flagged it: `gates_failed {'secrets': [[23, 'secret_assignment', 'API_KEY = "sk-9f2...4c6e"']]}`. The run ended `failed` — refused on policy, with a traceable reason. The agent did its job; the gate did its job; the pipeline refused to ship a credential into code.
 - **A trap the agent skipped.** `tier4_rework` is designed so the obvious fix (hardcoding the one case in the repro) passes the repro test but breaks the full suite — forcing the agent to iterate. This codex run found the real fix directly, in one round. The retry path is exercised by the mock bench and the harness tests instead; the honest number is "one round."
 
-And one failure of the harness itself, because this is a public document: state C once ran the suite with the gold patch reverted, spuriously rejecting good repro tests. It was found by auditing the run log (`assert 114.99999999999999 == 118.0` is the fixture's real float bug, not the harness bug) and fixed in commit `173a92a`. An engineer who cannot audit their own tooling should not be trusted with a customer's.
+And one failure of the harness itself, because this is a public document: state C once ran the suite with the gold patch reverted, spuriously rejecting good repro tests. It was found by auditing the run log (`assert 114.99999999999999 == 118.0` is the fixture's real float bug, not the harness bug) and fixed in commit `b5da0d7`. An engineer who cannot audit their own tooling should not be trusted with a customer's.
 
 ## fde bench
 

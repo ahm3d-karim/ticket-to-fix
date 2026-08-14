@@ -35,7 +35,7 @@ row-7 errors with zero visible wrong output. That's the strongest bench result.
 - `20260813-174734-2ea7` (`reproducing`), `20260813-173226-c66c`
   (`reproducing`), several `failed` runs: corpses from the original chain
   killed when its parent CLI session ended (18:0x), plus earlier debugging
-  (harness state-C gold-reapply bug — fixed in commits 290cb38/173a92a).
+  (harness state-C gold-reapply bug — fixed in commits 9e195d0/b5da0d7).
 - `20260813-182903-eedd` / `-904-af3c` / `-905-469c` (`failed`): first restart
   attempt failed with `[WinError 2]` — codex not on PATH in the background
   shell. Fixed: codex lives at
@@ -50,7 +50,7 @@ row-7 errors with zero visible wrong output. That's the strongest bench result.
    `awaiting_approval` by design. Approve with `fde approve <run_id>` if you
    want them deployed; or leave as demo state.
 2. **GitHub push DONE** — repo is public at
-   https://github.com/ahm3d-karim/ticket-to-fix (HEAD `0d73a7c`: README +
+   https://github.com/ahm3d-karim/ticket-to-fix (HEAD `48eb3ff`: README +
    fixtures bench; auth-error handling fix). STATUS.md itself is now committed
    so the repo's own story matches reality.
 3. `fde bench` (full-corpus pass-rate command) still roadmap — Stage 5.
@@ -75,5 +75,5 @@ cd demo-app && git log --oneline prod -5 # deploy/revert evidence
 
 Harness 3-state check semantics: A = repro test fails on buggy code with
 ticket symptom, B = passes with gold applied, C = full suite green with gold.
-State C re-applies gold (regression fix 173a92a — strict suites were spuriously
+State C re-applies gold (regression fix b5da0d7 — strict suites were spuriously
 rejecting good repro tests).

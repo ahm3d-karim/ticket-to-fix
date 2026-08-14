@@ -71,7 +71,7 @@ The headline result is tier3: the invisible bug — a `.catch(() => {})` swallow
 
 The demo-app `prod` branch tells the same story in three commits: `cf5a6e0` buggy server + gold.patch → `74a6a14` fix → `1f78f8e` revert. Rollback is a git operation — exact and verifiable.
 
-Honest footnotes: in the demo runs the approval was auto-granted to exercise the deploy loop, and the three tier runs sit at `awaiting_approval` by design — a human has not actually pushed them anywhere. The tool itself is green: **52/52 tests pass** at HEAD (`270d80c`), and `acceptance.sh` — the full end-to-end loop — was re-verified **2026-08-14 in 2m16s** (start 01:06:41 → end 01:08:57, `ACCEPTANCE PASS`, run `20260814-010641-7cbe`).
+Honest footnotes: in the demo runs the approval was auto-granted to exercise the deploy loop, and the three tier runs sit at `awaiting_approval` by design — a human has not actually pushed them anywhere. The tool itself is green: **52/52 tests pass** at HEAD (`2accbe4`), and `acceptance.sh` — the full end-to-end loop — was re-verified **2026-08-14 in 2m16s** (start 01:06:41 → end 01:08:57, `ACCEPTANCE PASS`, run `20260814-010641-7cbe`).
 
 ## The tampering timeline
 
@@ -86,7 +86,7 @@ The design rule this proves: safety gates must be structural, not checks the age
 Two honesty notes, because this is a public document:
 
 - **No surviving run log contains an actual tampering event.** A grep for `skip-worktree|tamper|neutered|update-index` across every `run.jsonl` and chain transcript returns zero hits. The three escalations are documented in harness code comments and the README as what motivated the guards during development. The logged trace is tier1's first repro attempt rejected at state A — the test failed on the buggy code but without the ticket symptom in its output — and accepted on the second attempt. The run logs prove the rejections; they do not record the cause. The guards are prophylactic, and this document says so.
-- **The harness itself lied once.** State C ran the suite with the gold patch reverted (the post-B restore undid it, and C did not re-apply it), so good repro tests were spuriously rejected — 3/3 in run `20260813-171050-4e7b`, each failing with "full suite failed with gold applied (rc=1)" while the same test passed state B. It was found by auditing the run log, and fixed in commit `173a92a` ("fix: state C re-applies gold patch before the suite"). The famous `assert 114.99999999999999 == 118.0` in that log is the tier2 fixture's real floating-point bug surfacing in captured output — not the harness bug. The harness bug was rejecting a good repro anyway. An engineer who cannot audit their own tooling should not be trusted with a customer's.
+- **The harness itself lied once.** State C ran the suite with the gold patch reverted (the post-B restore undid it, and C did not re-apply it), so good repro tests were spuriously rejected — 3/3 in run `20260813-171050-4e7b`, each failing with "full suite failed with gold applied (rc=1)" while the same test passed state B. It was found by auditing the run log, and fixed in commit `b5da0d7` ("fix: state C re-applies gold patch before the suite"). The famous `assert 114.99999999999999 == 118.0` in that log is the tier2 fixture's real floating-point bug surfacing in captured output — not the harness bug. The harness bug was rejecting a good repro anyway. An engineer who cannot audit their own tooling should not be trusted with a customer's.
 
 ## Operational lessons
 
@@ -120,18 +120,18 @@ bash acceptance.sh                         # the full loop, live
 
 ## Sources
 
-Every claim above is traceable to the evidence pack (`case-study-evidence.md`, extracted read-only from the repo at HEAD `270d80c` on 2026-08-14) or to the repo files cited inline. Key mappings:
+Every claim above is traceable to the evidence pack (`case-study-evidence.md`, extracted read-only from the repo at HEAD `2accbe4` on 2026-08-14) or to the repo files cited inline. Key mappings:
 
 - **Bench table, tier3 headline, chain completion ~18:55, deploy/rollback loop, auto-approval note** — evidence pack §1, §4; `STATUS.md:7-31`.
 - **Harness A/B/C contract and implementation** — evidence pack §3; `fde/harness.py:10-14, 104-167`.
 - **Tampering vectors and structural closure of skip-worktree** — evidence pack §5a; `fde/harness.py:133-138, 208-250`, `fde/agents.py:316-340`.
 - **Zero tampering events in run logs (grep results, event inventory)** — evidence pack §5b, Appendix; `runs/*/run.jsonl`, `runs/_chain2.log`.
-- **Harness state-C bug, fix commits `173a92a`/`290cb38`, the `114.999` value, live failure run `171050-4e7b`** — evidence pack §6; `git show 173a92a`, `runs/20260813-171050-4e7b/run.jsonl`.
-- **52 tests at HEAD, CLI surface** — evidence pack §8; `STATUS.md:60-61`; `pytest --collect-only -q` at HEAD `270d80c`.
+- **Harness state-C bug, fix commits `b5da0d7`/`9e195d0`, the `114.999` value, live failure run `171050-4e7b`** — evidence pack §6; `git show b5da0d7`, `runs/20260813-171050-4e7b/run.jsonl`.
+- **52 tests at HEAD, CLI surface** — evidence pack §8; `STATUS.md:60-61`; `pytest --collect-only -q` at HEAD `2accbe4`.
 - **acceptance.sh PASS 2026-08-14, 2m16s, run `20260814-010641-7cbe`** — `runs/acceptance-verify.log` (verify start 01:06:41 → end 01:08:57, `ACCEPTANCE PASS`, `acceptance_exit=0`); earlier PASS in `runs/_acceptance.log` (run `20260813-201736-23f5`).
 - **Process-tree corpses, `[WinError 2]` / PATH, codex version** — evidence pack §7; `STATUS.md:35-43`; run-state inventory in evidence pack §7b.
 - **`ROUND_TIMEOUT = 900`** — `fde/agents.py:28`; logged fix-round durations — `runs/acceptance-verify.log`, `runs/_acceptance.log`.
 - **Repro prompt "UNTOUCHED" warning** — `fde/agents.py:209-212`.
 - **`FDE_AGENT_BACKEND` pluggability (codex implemented only)** — `fde/agents.py:25`; README "Bring your own key" section.
 - **Sandbox = worktree + timeouts, not Docker; taskkill best-effort** — README "Security model" section; `fde/harness.py:1-8, 52-66`.
-- **Public repo, pushed HEAD `0d73a7c`** — `STATUS.md:52-55`.
+- **Public repo, pushed HEAD `48eb3ff`** — `STATUS.md:52-55`.
