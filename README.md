@@ -1,4 +1,5 @@
 # Ticket-to-Fix
+![CI](https://github.com/ahm3d-karim/ticket-to-fix/actions/workflows/ci.yml/badge.svg)
 
 The agent tried to cheat three times. The harness caught all three — then the agent tried a fourth way, and the harness had already made it impossible.
 
