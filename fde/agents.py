@@ -1,4 +1,10 @@
-"""Agent orchestration: non-interactive Codex wrapper + repro/fix loops.
+"""Agent orchestration: pluggable agent backends + repro/fix loops.
+
+Backends (FDE_AGENT_BACKEND): ``codex`` (default, non-interactive Codex
+CLI), ``claude`` (non-interactive Claude Code CLI), ``mock`` (deterministic
+offline stand-in). Every agent step funnels through ``codex_exec``, which
+dispatches on the configured backend; unknown values raise instead of
+silently falling through to codex.
 
 Contracts:
 - codex exec runs in the run's worktree only; paths in prompts are MSYS-safe
@@ -13,6 +19,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -24,10 +31,27 @@ from .runlog import append, run_dir
 from .ticket import parse_ticket
 
 BACKEND = os.environ.get("FDE_AGENT_BACKEND", "codex")
+VALID_BACKENDS = ("codex", "mock", "claude")
 REPRO_ATTEMPTS = 3
 FIX_ROUNDS = 8
 ROUND_TIMEOUT = 900
 REPRO_FILES = {"js": "repro.test.js", "py": "repro_test.py"}
+
+
+def _dispatch_backend() -> str:
+    """Resolve the configured agent backend; reject unknown values.
+
+    The one dispatch point every agent step funnels through: the backend
+    name (env var or module default) maps 1:1 to an invoker. Anything else
+    raises a clear error instead of silently falling through to codex — the
+    historical bug where `FDE_AGENT_BACKEND=openai` quietly ran codex.
+    """
+    backend = BACKEND
+    if backend not in VALID_BACKENDS:
+        raise ValueError(
+            f"unknown FDE_AGENT_BACKEND {backend!r} — expected one of "
+            f"{'|'.join(VALID_BACKENDS)} (codex is the default)")
+    return backend
 
 
 class AgentAuthError(Exception):
@@ -36,10 +60,14 @@ class AgentAuthError(Exception):
 
 
 def codex_version() -> str:
-    if BACKEND == "mock":
-        return "mock"  # never touch the codex binary in mock mode
+    """Best-effort version string for the active backend ("unknown" on any
+    failure — never a crash; the mock never touches a real binary)."""
+    backend = _dispatch_backend()
+    if backend == "mock":
+        return "mock"
+    binary = _claude_binary() if backend == "claude" else "codex"
     try:
-        r = subprocess.run(["codex", "--version"], capture_output=True,
+        r = subprocess.run([binary, "--version"], capture_output=True,
                            text=True, timeout=15)
         return (r.stdout or r.stderr).strip().splitlines()[0] or "unknown"
     except Exception:
@@ -127,7 +155,11 @@ def _last_message(out: str) -> str:
 
 
 def codex_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
-    """Run codex non-interactively. Returns rc/out/timed_out/summary/duration_ms.
+    """Run the configured agent backend non-interactively.
+
+    Returns rc/out/timed_out/summary/duration_ms. Dispatches on
+    ``_dispatch_backend()``: codex (default), claude, or mock — anything
+    else raises a clear error before any binary is touched.
 
     Sandbox note: codex 0.147's Windows sandbox (read-only / workspace-write)
     blocks its own default shell (powershell) — a known upstream issue. We run
@@ -141,9 +173,12 @@ def codex_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     (`taskkill /F /T`) on expiry — the timeout is guaranteed to fire.
     """
     t0 = time.monotonic()
-    if BACKEND == "mock":
+    backend = _dispatch_backend()
+    if backend == "mock":
         # deterministic offline stand-in: no codex, no network, no key
         return _mock_exec(prompt, cwd, timeout)
+    if backend == "claude":
+        return _claude_exec(prompt, cwd, timeout)
     flags = ["codex", "exec", "--json", "-s", "danger-full-access", "-C", cwd, prompt]
     env = os.environ.copy()
     if "OPENCODE_GO_API_KEY" not in env:
@@ -190,6 +225,115 @@ def _kill_proc_tree(pid: int) -> None:
     """Kill the process tree (taskkill /T catches the node wrapper's children)."""
     subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                    capture_output=True, text=True)
+
+
+# --------------------------------------------------------------------------- #
+# claude backend (FDE_AGENT_BACKEND=claude)
+# --------------------------------------------------------------------------- #
+# Non-interactive Claude Code CLI, same contract as codex_exec:
+# {"rc", "out", "timed_out", "summary", "duration_ms"} + AgentAuthError on
+# provider 401s (never a harness-shaped rejection).
+#
+# Invocation: `claude -p --output-format json --dangerously-skip-permissions`
+# — the documented headless form (`-p` print mode + `--output-format json`
+# machine-readable result). `claude --help` could not be consulted on the
+# dev machine (the CLI is not installed there), so this is the documented
+# headless invocation; re-verify the flag set against `claude --help` on a
+# machine that has it. `--dangerously-skip-permissions` is the analogue of
+# codex's `-s danger-full-access`: containment comes from the pipeline
+# design (isolated worktree, resets between rounds, 3-state harness), not
+# the CLI's permission prompts — headless mode cannot answer them.
+
+CLAUDE_AUTH_FAILURES = ("401", "Unauthorized", "Missing bearer",
+                        "authentication failed", "invalid api key",
+                        "not authenticated")
+
+
+def _claude_binary() -> str:
+    """Resolve the `claude` CLI. shutil.which honors PATHEXT, so this finds
+    the npm-global `claude.cmd` shim on Windows (a bare `claude` name does
+    NOT resolve to `claude.cmd` via CreateProcess) as well as a native
+    `claude`/`claude.exe`. Falls back to the bare name so a missing CLI
+    surfaces as the FileNotFoundError we translate into a clear error."""
+    return shutil.which("claude") or "claude"
+
+
+def _claude_last_message(out: str) -> str:
+    """Extract the final reply from `claude -p --output-format json`.
+
+    Prefers the trailing JSON result object ({"result": ...}); falls back
+    to the codex JSONL extractor, then to the last non-empty line.
+    """
+    last = ""
+    for line in out.splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("result"), str) \
+                and obj["result"].strip():
+            last = obj["result"].strip()
+    if last:
+        return last
+    return _last_message(out) or next(
+        (l.strip() for l in reversed(out.splitlines()) if l.strip()), "")
+
+
+def _claude_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
+    """Run the Claude Code CLI headless in the run's worktree (cwd).
+
+    Same return shape as codex_exec and the same Popen watchdog (poll +
+    tree-kill on expiry — `subprocess.run(timeout=)` is not reliable with
+    these node-wrapper CLIs). The CLI runs with cwd=the worktree, the
+    analogue of codex's `-C cwd`.
+    """
+    t0 = time.monotonic()
+    flags = [_claude_binary(), "-p", "--output-format", "json",
+             "--dangerously-skip-permissions", prompt]
+    env = os.environ.copy()
+    if "OPENCODE_GO_API_KEY" not in env:
+        _bootstrap_env(env)
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        proc = subprocess.Popen(flags, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                env=env, cwd=cwd, creationflags=creationflags)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "FDE_AGENT_BACKEND=claude but the `claude` CLI was not found on "
+            "PATH — install it (npm install -g @anthropic-ai/claude-code) "
+            "or set FDE_AGENT_BACKEND=codex|mock") from None
+    chunks: list[str] = []
+
+    def _reader():
+        try:
+            for line in proc.stdout:
+                chunks.append(line)
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while proc.poll() is None:
+        if time.monotonic() > deadline:
+            timed_out = True
+            _kill_proc_tree(proc.pid)
+            break
+        time.sleep(1)
+    if proc.poll() is None:
+        proc.wait(timeout=30)
+    reader.join(timeout=5)
+    out = "".join(chunks)
+    if proc.returncode != 0 and any(s in out for s in CLAUDE_AUTH_FAILURES):
+        raise AgentAuthError(
+            "agent auth failed (401 from the model provider) — set the API "
+            "key in the environment or FDE_AGENT_ENV_FILE (see README "
+            "'Bring your own key')")
+    return {"rc": proc.returncode, "out": out, "timed_out": timed_out,
+            "summary": _claude_last_message(out),
+            "duration_ms": int((time.monotonic() - t0) * 1000)}
 
 
 # --------------------------------------------------------------------------- #
