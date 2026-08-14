@@ -3,7 +3,8 @@
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git bash python3 ca-certificates \
+        git bash python3 python3-pip python-is-python3 ca-certificates \
+    && python3 -m pip install --no-cache-dir --break-system-packages pytest \
     && rm -rf /var/lib/apt/lists/*
 
 ENV FDE_CONTAINER=1
