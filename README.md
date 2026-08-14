@@ -59,7 +59,14 @@ uv run fde status <run-id>
 
 ### Bring your own key
 
-The agent step shells out to an external agent CLI (codex by default). Point codex at any OpenAI-compatible endpoint via `~/.codex/config.toml` and make the API key available to the process. Backends are pluggable via `FDE_AGENT_BACKEND=codex|mock|claude|deepseek` (default `codex`; unknown values raise an error naming the valid options). For Claude Code: `npm install -g @anthropic-ai/claude-code`, authenticate (`claude /login` or `ANTHROPIC_API_KEY`), then set `FDE_AGENT_BACKEND=claude` — the pipeline drives it headless (`claude -p --output-format json`) in the run's worktree. For DeepSeek Harness: `npm install -g @deepseek-ai/dsh`, configure a model/API key once (`dsh web` → Settings → Models; the DeepSeek API key), then set `FDE_AGENT_BACKEND=deepseek` — the pipeline drives it headless (`dsh --profile headless "<job>"`) in the run's worktree. The harness, gates, audit log, deploy, and rollback are deterministic — no key, no network.
+The agent step shells out to an external agent CLI. Pick the backend with `FDE_AGENT_BACKEND` (default `codex`; unknown values raise an error naming the valid options):
+
+- **codex** *(default)* — point it at any OpenAI-compatible endpoint via `~/.codex/config.toml` and make the API key available to the process.
+- **claude** — `npm install -g @anthropic-ai/claude-code`, authenticate (`claude /login` or `ANTHROPIC_API_KEY`), then `FDE_AGENT_BACKEND=claude`. The pipeline drives it headless (`claude -p --output-format json`) in the run's worktree.
+- **deepseek** — `npm install -g @deepseek-ai/dsh`, configure a model and API key once (`dsh web` → Settings → Models), then `FDE_AGENT_BACKEND=deepseek`. The pipeline drives it headless (`dsh --profile headless "<job>"`) in the run's worktree.
+- **mock** — deterministic offline stand-in: no CLI, no key, no network. Handy for demos and the bench.
+
+Everything else — the harness, gates, audit log, deploy, and rollback — is deterministic and needs no key or network.
 
 ## CLI
 
