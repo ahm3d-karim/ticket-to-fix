@@ -3,9 +3,11 @@
 ``FDE_SANDBOX=docker`` routes every ``harness.run_cmd`` invocation (install,
 test, git apply/restore/diff — the whole pipeline) through
 :func:`run_in_docker`: an ephemeral ``fde-sandbox`` container running
-``bash -c <cmd>`` with the worktree mounted at ``/workspace`` and networking
-disabled (``--network none``), so the repo's "sandbox" claim is literal
-instead of a worktree-with-timeouts approximation.
+``bash -c <cmd>`` with the worktree mounted at ``/workspace``, networking
+disabled (``--network none``), all capabilities dropped (``--cap-drop
+ALL``) and new privileges blocked (``--security-opt no-new-privileges``),
+so the repo's "sandbox" claim is literal instead of a worktree-with-
+timeouts approximation.
 
 Unset or empty ``FDE_SANDBOX`` = host mode, current behavior untouched
 (the one-command demo never depends on Docker). Unknown values raise
@@ -13,7 +15,9 @@ Unset or empty ``FDE_SANDBOX`` = host mode, current behavior untouched
 the agent backend (fde/agents.py ``_dispatch_backend``), never a silent
 fallthrough. The docker CLI itself is resolved per call via
 ``shutil.which``; a missing binary raises ``RuntimeError`` instead of a
-confusing ``FileNotFoundError`` from Popen.
+confusing ``FileNotFoundError`` from Popen. The daemon is preflighted per
+call (``_daemon_ready``); when it is unreachable, ``run_in_docker`` fails
+fast with ``RuntimeError`` — never a silent fallback.
 
 The container name is derived from a fresh ``uuid4()`` so concurrent runs
 never collide; teardown (``docker kill`` on timeout, ``docker rm -f``
@@ -49,6 +53,10 @@ _MISSING_DOCKER_MSG = (
     "FDE_SANDBOX=docker but the docker CLI was not found on PATH — "
     "start Docker Desktop or unset FDE_SANDBOX")
 
+_DAEMON_DOWN_MSG = (
+    "FDE_SANDBOX=docker but the docker daemon is not reachable — "
+    "start Docker Desktop or unset FDE_SANDBOX")
+
 
 def _docker_binary() -> str:
     """Resolve the docker CLI; raise a clear error when it is missing."""
@@ -56,6 +64,17 @@ def _docker_binary() -> str:
     if docker is None:
         raise RuntimeError(_MISSING_DOCKER_MSG)
     return docker
+
+
+def _daemon_ready(docker: str) -> bool:
+    """True when the docker server answers `version` within 10s."""
+    try:
+        r = subprocess.run(
+            [docker, "version", "--format", "{{.Server.Version}}"],
+            capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
 
 
 def _best_effort(argv) -> None:
@@ -79,12 +98,16 @@ def run_in_docker(cmd: str, cwd: str, timeout: int = 60) -> dict:
     docker = _docker_binary()
     if docker is None:  # mock/monkeypatched _docker_binary may return None
         raise RuntimeError(_MISSING_DOCKER_MSG)
+    if not _daemon_ready(docker):
+        raise RuntimeError(_DAEMON_DOWN_MSG)
     name = "fde-sandbox-" + uuid.uuid4().hex[:8]
     argv = [
         docker, "run", "--rm", "--name", name,
         "-v", f"{os.path.abspath(cwd)}:/workspace",
         "-w", "/workspace",
         "--network", "none",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
         os.environ.get("FDE_SANDBOX_IMAGE", "fde-sandbox:latest"),
         "bash", "-c", cmd,
     ]

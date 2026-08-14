@@ -1,12 +1,18 @@
 """Offline tests for the FDE_SANDBOX=docker sandbox (roadmap S7, task 1.4).
 
-No real Docker is ever touched: a FAKE `docker` CLI is placed on PATH,
-mirroring tests/test_backends.py's _write_bin_shim / _make_fake_bin pattern
-(a .cmd batch file on Windows, an executable POSIX script elsewhere).
+No real Docker is ever touched: a FAKE `docker` CLI is placed on PATH.
+The `_write_bin_shim` helper below is a LOCAL copy of the one in
+tests/test_backends.py (a .cmd batch file on Windows, an executable
+POSIX script elsewhere) — replicated here on purpose because tests/ is
+a package and cross-test imports are fragile (Phase 2 plan deviation;
+tests/test_backends.py stays untouched).
 The fake logs its full argv to a file so tests can assert the exact
 mount/network/image arguments, sleeps FDE_FAKE_DOCKER_DELAY seconds on
 `run` (exercising the timeout path), and answers `kill`/`rm` instantly so
-timeout teardown never hangs.
+timeout teardown never hangs. It also answers the `version` subcommand
+(the daemon preflight) WITHOUT logging it — so the first log line is
+always the `run` invocation under test. `daemon_down=True` makes
+`version` exit 1 (the fail-fast preflight path).
 
 sandbox_active() reads FDE_SANDBOX at call time (per the S7 contract); the
 tests additionally reload fde.sandbox after every env mutation so they
@@ -19,21 +25,35 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_backends import _write_bin_shim
-
 FAKE_DOCKER_VERSION = "docker 29.7.2-fake"
 FAKE_DOCKER_RAN = "fake-docker-ran"
 
 
-def _make_fake_docker(tmp_path, monkeypatch) -> dict:
+def _write_bin_shim(bin_dir: Path, name: str, body_cmd: str, body_sh: str) -> None:
+    """Write a fake CLI: `<name>.cmd` on Windows, an executable POSIX script
+    elsewhere (CI runners are Linux; a bare name does not resolve to
+    `<name>.cmd` there — the backend's shutil.which lookup is exactly what
+    these tests exercise). Local copy of tests/test_backends.py's helper."""
+    if os.name == "nt":
+        (bin_dir / f"{name}.cmd").write_text(body_cmd, encoding="utf-8")
+    else:
+        script = bin_dir / name
+        script.write_text(body_sh, encoding="utf-8")
+        script.chmod(0o755)
+
+
+def _make_fake_docker(tmp_path, monkeypatch, daemon_down: bool = False) -> dict:
     """Put a fake `docker` CLI on PATH.
 
     Appends its full argv (space-joined) to docker-args.txt on every call,
-    answers `--version`, and on `run` prints FAKE_DOCKER_RAN and exits 0.
+    answers `--version` AND the `version` subcommand (the daemon preflight
+    — answered without logging so the log's first line stays the `run`
+    invocation), and on `run` prints FAKE_DOCKER_RAN and exits 0.
     When FDE_FAKE_DOCKER_DELAY is set, `run` sleeps that many seconds
     first (the timeout path); `kill`/`rm` answer instantly. The log is
     APPENDED (`>>`) so the run invocation stays the first line even after
-    the teardown rm.
+    the teardown rm. With `daemon_down=True`, `version` exits 1 (daemon
+    unreachable — run_in_docker must fail fast).
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -47,6 +67,11 @@ def _make_fake_docker(tmp_path, monkeypatch) -> dict:
         "@echo off\r\n"
         "setlocal enabledelayedexpansion\r\n"
         'if "%1"=="--version" (\r\n'
+        f"  echo {FAKE_DOCKER_VERSION}\r\n"
+        "  exit /b 0\r\n"
+        ")\r\n"
+        'if "%1"=="version" (\r\n'
+        f'  if "{daemon_down}"=="True" exit /b 1\r\n'
         f"  echo {FAKE_DOCKER_VERSION}\r\n"
         "  exit /b 0\r\n"
         ")\r\n"
@@ -80,6 +105,13 @@ def _make_fake_docker(tmp_path, monkeypatch) -> dict:
         # POSIX script
         "#!/bin/sh\n"
         f'if [ "$1" = "--version" ]; then\n'
+        f'  echo "{FAKE_DOCKER_VERSION}"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "version" ]; then\n'
+        f'  if [ "{daemon_down}" = "True" ]; then\n'
+        "    exit 1\n"
+        "  fi\n"
         f'  echo "{FAKE_DOCKER_VERSION}"\n'
         "  exit 0\n"
         "fi\n"
@@ -247,3 +279,58 @@ def test_run_cmd_docker_mode_routes(monkeypatch, tmp_path):
     assert FAKE_DOCKER_RAN in res["out"]
     argv = _docker_argv(logs["args"])
     assert argv.split()[0] == "run"
+
+
+def test_argv_has_hardening_flags(tmp_path, monkeypatch):
+    """run_in_docker argv carries --cap-drop ALL and --security-opt
+    no-new-privileges, ordered after --network none (Phase 2 hardening)."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    monkeypatch.setenv("FDE_SANDBOX_IMAGE", "testimg")
+    sb = _sandbox()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    sb.run_in_docker("echo hi", str(cwd), 30)
+
+    argv = _docker_argv(logs["args"])
+    assert "--cap-drop ALL" in argv
+    assert "--security-opt no-new-privileges" in argv
+    # contract order: ... --network none --cap-drop ALL --security-opt ...
+    markers = ["--network none", "--cap-drop ALL",
+               "--security-opt no-new-privileges"]
+    positions = [argv.index(m) for m in markers]
+    assert positions == sorted(positions)
+
+
+def test_daemon_down_raises(tmp_path, monkeypatch):
+    """Daemon unreachable (`version` exits 1) -> RuntimeError naming
+    FDE_SANDBOX — fail fast, never a silent fallback (constraint 5)."""
+    _make_fake_docker(tmp_path, monkeypatch, daemon_down=True)
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    sb = _sandbox()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sb.run_in_docker("echo hi", str(tmp_path), 30)
+
+    msg = str(excinfo.value)
+    assert "daemon is not reachable" in msg
+    assert "FDE_SANDBOX" in msg
+
+
+def test_volume_arg_uses_abs_windows_form(tmp_path, monkeypatch):
+    """Lock test: the -v mount is always the ABSOLUTE cwd form, even when
+    run_in_docker is given a relative cwd (path contract, Windows-safe)."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    monkeypatch.setenv("FDE_SANDBOX_IMAGE", "testimg")
+    sb = _sandbox()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    sb.run_in_docker("echo hi", "work", 30)  # relative cwd on purpose
+
+    argv = _docker_argv(logs["args"])
+    assert f"-v {os.path.abspath(str(work))}:/workspace" in argv
+    assert "-v work:/workspace" not in argv
