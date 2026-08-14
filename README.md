@@ -44,7 +44,7 @@ Requirements: `uv`, `node >= 18`, `git`. The agent backend needs a model key (se
 ```bash
 git clone https://github.com/ahm3d-karim/ticket-to-fix
 cd ticket-to-fix
-uv sync --extra test
+uv sync --group dev
 
 # the whole pipeline on one fixture, end to end (a few minutes — agent round-trips dominate)
 bash acceptance.sh
@@ -59,7 +59,7 @@ uv run fde status <run-id>
 
 ### Bring your own key
 
-The agent step shells out to an external agent CLI (codex by default). Point codex at any OpenAI-compatible endpoint via `~/.codex/config.toml` and make the API key available to the process. The harness, gates, audit log, deploy, and rollback are deterministic — no key, no network.
+The agent step shells out to an external agent CLI (codex by default). Point codex at any OpenAI-compatible endpoint via `~/.codex/config.toml` and make the API key available to the process. Backends are pluggable via `FDE_AGENT_BACKEND=codex|mock|claude` (default `codex`; unknown values raise an error naming the valid options). For Claude Code: `npm install -g @anthropic-ai/claude-code`, authenticate (`claude /login` or `ANTHROPIC_API_KEY`), then set `FDE_AGENT_BACKEND=claude` — the pipeline drives it headless (`claude -p --output-format json`) in the run's worktree. The harness, gates, audit log, deploy, and rollback are deterministic — no key, no network.
 
 ## CLI
 

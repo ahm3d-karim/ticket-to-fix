@@ -13,7 +13,7 @@ recorded with ``state="failed"`` plus a reason and the bench moves on.
 
 Run it with::
 
-    .venv/Scripts/python.exe -m fde.bench --backend mock
+    uv run fde bench --backend mock
 
 The default backend is ``codex`` (the real agent). ``--backend mock`` is the
 deterministic, offline stand-in (no codex, no network, no key).
@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="fde.bench", description="run the fixture corpus and render a report")
     ap.add_argument("--backend", default=os.environ.get("FDE_AGENT_BACKEND", "codex"),
-                    help="agent backend: codex (default) or mock")
+                    help="agent backend: codex (default), mock, or claude")
     ap.add_argument("--fixture", action="append", dest="fixtures", metavar="NAME",
                     help="restrict to a fixture dir name (repeatable)")
     args = ap.parse_args(argv)
