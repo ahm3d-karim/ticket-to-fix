@@ -27,6 +27,7 @@ Deviations from the plan's literal wording (documented here on purpose):
 """
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -129,16 +130,31 @@ def start_server(worktree: str, port: int, run_id: str,
 
 
 def stop_server(run_id: str, pid_name: str = "server.pid") -> bool:
-    """Kill the recorded PID's process tree (taskkill /F /T) and drop the pid file."""
+    """Kill the recorded PID (process tree on Windows) and drop the pid file."""
     pid_file = run_dir(run_id) / pid_name
     if not pid_file.exists():
         return False
     pid = pid_file.read_text(encoding="utf-8").strip()
-    try:
-        subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
-                       capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
+                           capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        # POSIX: node was spawned directly (no shell), so the recorded pid IS
+        # the server; SIGTERM then a SIGKILL safety net. ProcessLookupError
+        # means it already exited.
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass  # already exited (PermissionError: some platforms report dead pids this way)
+        else:
+            time.sleep(0.5)
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
     pid_file.unlink(missing_ok=True)
     return True
 
