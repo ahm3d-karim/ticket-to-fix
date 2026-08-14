@@ -61,10 +61,12 @@ uv run fde status <run-id>
 
 The agent step shells out to an external agent CLI. Pick the backend with `FDE_AGENT_BACKEND` (default `codex`; unknown values raise an error naming the valid options):
 
-- **codex** *(default)* — point it at any OpenAI-compatible endpoint via `~/.codex/config.toml` and make the API key available to the process.
-- **claude** — `npm install -g @anthropic-ai/claude-code`, authenticate (`claude /login` or `ANTHROPIC_API_KEY`), then `FDE_AGENT_BACKEND=claude`. The pipeline drives it headless (`claude -p --output-format json`) in the run's worktree.
-- **deepseek** — `npm install -g @deepseek-ai/dsh`, configure a model and API key once (`dsh web` → Settings → Models), then `FDE_AGENT_BACKEND=deepseek`. The pipeline drives it headless (`dsh --profile headless "<job>"`) in the run's worktree.
-- **mock** — deterministic offline stand-in: no CLI, no key, no network. Handy for demos and the bench.
+| Backend | Install | Key / auth | Driven headless via |
+|---|---|---|---|
+| `codex` *(default)* | `codex` CLI | `~/.codex/config.toml` → any OpenAI-compatible endpoint; key in env | `codex exec --json -s danger-full-access` |
+| `claude` | `npm install -g @anthropic-ai/claude-code` | `claude /login` or `ANTHROPIC_API_KEY` | `claude -p --output-format json` |
+| `deepseek` | `npm install -g @deepseek-ai/dsh` | `dsh web` → Settings → Models (DeepSeek API key) | `dsh --profile headless "<job>"` |
+| `mock` | — | none — deterministic and offline | in-process stand-in, no CLI |
 
 Everything else — the harness, gates, audit log, deploy, and rollback — is deterministic and needs no key or network.
 
