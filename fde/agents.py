@@ -1,7 +1,8 @@
 """Agent orchestration: pluggable agent backends + repro/fix loops.
 
 Backends (FDE_AGENT_BACKEND): ``codex`` (default, non-interactive Codex
-CLI), ``claude`` (non-interactive Claude Code CLI), ``mock`` (deterministic
+CLI), ``claude`` (non-interactive Claude Code CLI), ``deepseek`` (DeepSeek
+Harness ``dsh --profile headless``), ``mock`` (deterministic
 offline stand-in). Every agent step funnels through ``codex_exec``, which
 dispatches on the configured backend; unknown values raise instead of
 silently falling through to codex.
@@ -31,7 +32,7 @@ from .runlog import append, run_dir
 from .ticket import parse_ticket
 
 BACKEND = os.environ.get("FDE_AGENT_BACKEND", "codex")
-VALID_BACKENDS = ("codex", "mock", "claude")
+VALID_BACKENDS = ("codex", "mock", "claude", "deepseek")
 REPRO_ATTEMPTS = 3
 FIX_ROUNDS = 8
 ROUND_TIMEOUT = 900
@@ -65,7 +66,8 @@ def codex_version() -> str:
     backend = _dispatch_backend()
     if backend == "mock":
         return "mock"
-    binary = _claude_binary() if backend == "claude" else "codex"
+    binary = {"claude": _claude_binary(), "deepseek": _deepseek_binary()}.get(
+        backend, "codex")
     try:
         r = subprocess.run([binary, "--version"], capture_output=True,
                            text=True, timeout=15)
@@ -175,8 +177,8 @@ def codex_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     """Run the configured agent backend non-interactively.
 
     Returns rc/out/timed_out/summary/duration_ms. Dispatches on
-    ``_dispatch_backend()``: codex (default), claude, or mock — anything
-    else raises a clear error before any binary is touched.
+    ``_dispatch_backend()``: codex (default), claude, deepseek, or mock —
+    anything else raises a clear error before any binary is touched.
 
     Sandbox note: codex 0.147's Windows sandbox (read-only / workspace-write)
     blocks its own default shell (powershell) — a known upstream issue. We run
@@ -196,6 +198,8 @@ def codex_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
         return _mock_exec(prompt, cwd, timeout)
     if backend == "claude":
         return _claude_exec(prompt, cwd, timeout)
+    if backend == "deepseek":
+        return _deepseek_exec(prompt, cwd, timeout)
     flags = ["codex", "exec", "--json", "-s", "danger-full-access", "-C", cwd, prompt]
     env = os.environ.copy()
     if "OPENCODE_GO_API_KEY" not in env:
@@ -261,9 +265,8 @@ def _kill_proc_tree(pid: int) -> None:
 # design (isolated worktree, resets between rounds, 3-state harness), not
 # the CLI's permission prompts — headless mode cannot answer them.
 
-CLAUDE_AUTH_FAILURES = ("401", "Unauthorized", "Missing bearer",
-                        "authentication failed", "invalid api key",
-                        "not authenticated")
+AUTH_FAILURES = ("401", "Unauthorized", "authentication failed",
+                 "invalid api key", "not authenticated")
 
 
 def _claude_binary() -> str:
@@ -296,30 +299,25 @@ def _claude_last_message(out: str) -> str:
         (l.strip() for l in reversed(out.splitlines()) if l.strip()), "")
 
 
-def _claude_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
-    """Run the Claude Code CLI headless in the run's worktree (cwd).
+def _run_cli(argv: list[str], cwd: str, timeout: int, missing_msg: str,
+             summarize) -> dict:
+    """Shared Popen watchdog for the headless CLI backends (claude, dsh).
 
-    Same return shape as codex_exec and the same Popen watchdog (poll +
-    tree-kill on expiry — `subprocess.run(timeout=)` is not reliable with
-    these node-wrapper CLIs). The CLI runs with cwd=the worktree, the
-    analogue of codex's `-C cwd`.
+    Poll + tree-kill on expiry — `subprocess.run(timeout=)` is not reliable
+    with node-wrapper CLIs. Provider 401s surface as AgentAuthError, never a
+    harness rejection. `summarize(out)` extracts the final reply.
     """
     t0 = time.monotonic()
-    flags = [_claude_binary(), "-p", "--output-format", "json",
-             "--dangerously-skip-permissions", prompt]
     env = os.environ.copy()
     if "OPENCODE_GO_API_KEY" not in env:
         _bootstrap_env(env)
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
-        proc = subprocess.Popen(flags, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True,
                                 env=env, cwd=cwd, creationflags=creationflags)
     except FileNotFoundError:
-        raise RuntimeError(
-            "FDE_AGENT_BACKEND=claude but the `claude` CLI was not found on "
-            "PATH — install it (npm install -g @anthropic-ai/claude-code) "
-            "or set FDE_AGENT_BACKEND=codex|mock") from None
+        raise RuntimeError(missing_msg) from None
     chunks: list[str] = []
 
     def _reader():
@@ -343,14 +341,49 @@ def _claude_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
         proc.wait(timeout=30)
     reader.join(timeout=5)
     out = "".join(chunks)
-    if proc.returncode != 0 and any(s in out for s in CLAUDE_AUTH_FAILURES):
+    if proc.returncode != 0 and any(s in out for s in AUTH_FAILURES):
         raise AgentAuthError(
             "agent auth failed (401 from the model provider) — set the API "
             "key in the environment or FDE_AGENT_ENV_FILE (see README "
             "'Bring your own key')")
     return {"rc": proc.returncode, "out": out, "timed_out": timed_out,
-            "summary": _claude_last_message(out),
+            "summary": summarize(out),
             "duration_ms": int((time.monotonic() - t0) * 1000)}
+
+
+def _claude_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
+    """Run the Claude Code CLI headless in the run's worktree (cwd)."""
+    argv = [_claude_binary(), "-p", "--output-format", "json",
+            "--dangerously-skip-permissions", prompt]
+    return _run_cli(
+        argv, cwd, timeout,
+        "FDE_AGENT_BACKEND=claude but the `claude` CLI was not found on "
+        "PATH — install it (npm install -g @anthropic-ai/claude-code) "
+        "or set FDE_AGENT_BACKEND=codex|mock",
+        _claude_last_message)
+
+
+def _deepseek_binary() -> str:
+    """Resolve the `dsh` CLI (same PATHEXT .cmd logic as claude)."""
+    return shutil.which("dsh") or "dsh"
+
+
+def _deepseek_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
+    """Run DeepSeek Harness headless in the run's worktree (cwd).
+
+    `dsh --profile headless "<job>"` runs one fresh persisted session,
+    prints the final answer, and exits (apps/cli docs). The invoking
+    directory is the default workspace root, so cwd=worktree is the analogue
+    of codex's `-C cwd`. Developer preview upstream: pin the npm version.
+    """
+    argv = [_deepseek_binary(), "--profile", "headless", prompt]
+    return _run_cli(
+        argv, cwd, timeout,
+        "FDE_AGENT_BACKEND=deepseek but the `dsh` CLI was not found on "
+        "PATH — install it (npm install -g @deepseek-ai/dsh) "
+        "or set FDE_AGENT_BACKEND=codex|mock",
+        lambda out: next((l.strip() for l in reversed(out.splitlines())
+                          if l.strip()), ""))
 
 
 # --------------------------------------------------------------------------- #

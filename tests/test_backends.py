@@ -26,55 +26,67 @@ FAKE_REPLY = json.dumps({
 })
 
 
-def _write_claude_shim(bin_dir: Path, body_cmd: str, body_sh: str) -> None:
-    """Write a fake `claude` CLI: `claude.cmd` on Windows, an executable
-    POSIX script elsewhere (CI runners are Linux; a bare `claude` name does
-    not resolve to `claude.cmd` there — the backend's shutil.which lookup is
-    exactly what these tests exercise)."""
+def _write_bin_shim(bin_dir: Path, name: str, body_cmd: str, body_sh: str) -> None:
+    """Write a fake CLI: `<name>.cmd` on Windows, an executable POSIX script
+    elsewhere (CI runners are Linux; a bare name does not resolve to
+    `<name>.cmd` there — the backend's shutil.which lookup is exactly what
+    these tests exercise)."""
     if os.name == "nt":
-        (bin_dir / "claude.cmd").write_text(body_cmd, encoding="utf-8")
+        (bin_dir / f"{name}.cmd").write_text(body_cmd, encoding="utf-8")
     else:
-        script = bin_dir / "claude"
+        script = bin_dir / name
         script.write_text(body_sh, encoding="utf-8")
         script.chmod(0o755)
 
 
-@pytest.fixture
-def fake_claude(tmp_path, monkeypatch):
-    """Put a fake `claude` CLI on PATH.
-
-    Logs its argv and working directory to files, prints a JSON result
-    object (the `claude -p --output-format json` shape), and answers
-    `--version`. Also cleans up the spawned process group via a helper.
-    """
+def _make_fake_bin(tmp_path, monkeypatch, name: str, version: str,
+                   reply: str) -> dict:
+    """Put a fake `<name>` CLI on PATH: answers `--version`, logs argv and
+    cwd to files, prints `reply` — the headless one-shot shape every
+    backend in this module expects."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     args_log = tmp_path / "args.txt"
     cwd_log = tmp_path / "cwd.txt"
-    _write_claude_shim(
-        bin_dir,
+    _write_bin_shim(
+        bin_dir, name,
         "@echo off\r\n"
-        'if "%1"=="--version" (\r\n'
-        "  echo claude-cli 2.0.0-fake\r\n"
+        f'if "%1"=="--version" (\r\n'
+        f"  echo {version}\r\n"
         "  exit /b 0\r\n"
         ")\r\n"
         f'echo %* > "{args_log}"\r\n'
         f'echo %CD% > "{cwd_log}"\r\n'
-        f"echo {FAKE_REPLY}\r\n"
+        f"echo {reply}\r\n"
         "exit /b 0\r\n",
         "#!/bin/sh\n"
-        'if [ "$1" = "--version" ]; then\n'
-        '  echo "claude-cli 2.0.0-fake"\n'
+        f'if [ "$1" = "--version" ]; then\n'
+        f'  echo "{version}"\n'
         "  exit 0\n"
         "fi\n"
         f'echo "$*" > "{args_log}"\n'
         f'echo "$PWD" > "{cwd_log}"\n'
-        f"echo '{FAKE_REPLY}'\n"
+        f"echo '{reply}'\n"
         "exit 0\n",
     )
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep
                        + os.environ.get("PATH", ""))
     return {"args": args_log, "cwd": cwd_log}
+
+
+@pytest.fixture
+def fake_claude(tmp_path, monkeypatch):
+    """Put a fake `claude` CLI on PATH (see _make_fake_bin)."""
+    return _make_fake_bin(tmp_path, monkeypatch, "claude",
+                          "claude-cli 2.0.0-fake", FAKE_REPLY)
+
+
+@pytest.fixture
+def fake_dsh(tmp_path, monkeypatch):
+    """Put a fake `dsh` (DeepSeek Harness) CLI on PATH."""
+    return _make_fake_bin(tmp_path, monkeypatch, "dsh",
+                          "dsh 0.1.0-fake",
+                          "fake dsh reply: repro test written")
 
 
 # --------------------------------------------------------------------------- #
@@ -115,8 +127,8 @@ def test_claude_backend_401_raises_agent_auth_error(tmp_path, monkeypatch):
     rejection — same contract as the codex path."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    _write_claude_shim(
-        bin_dir,
+    _write_bin_shim(
+        bin_dir, "claude",
         "@echo off\r\n"
         "echo Error: authentication failed: 401 invalid api key\r\n"
         "exit /b 1\r\n",
@@ -144,12 +156,71 @@ def test_claude_backend_missing_binary_raises_clear_error(
 
 
 # --------------------------------------------------------------------------- #
+# deepseek backend (dsh)
+# --------------------------------------------------------------------------- #
+
+def test_deepseek_backend_invokes_headless_profile_and_uses_answer(
+        fake_dsh, monkeypatch, tmp_path):
+    monkeypatch.setattr(agents, "BACKEND", "deepseek")
+    prompt = "write ONE failing test file"
+    res = agents.codex_exec(prompt, cwd=str(tmp_path))
+
+    # same rc/out/summary contract as the other backends
+    assert res["rc"] == 0
+    assert res["timed_out"] is False
+    assert res["summary"] == "fake dsh reply: repro test written"
+
+    # invoked `dsh --profile headless "<prompt>"` in the worktree
+    tokens = fake_dsh["args"].read_text(encoding="utf-8").split()
+    assert tokens[0] == "--profile"
+    assert tokens[1] == "headless"
+    assert prompt in fake_dsh["args"].read_text(encoding="utf-8")
+    assert fake_dsh["cwd"].read_text(encoding="utf-8").strip() == str(tmp_path)
+
+
+def test_deepseek_backend_version_reports_cli_version(fake_dsh, monkeypatch):
+    monkeypatch.setattr(agents, "BACKEND", "deepseek")
+    assert agents.codex_version() == "dsh 0.1.0-fake"
+
+
+def test_deepseek_backend_401_raises_agent_auth_error(tmp_path, monkeypatch):
+    """Provider 401 must surface as 'agent auth failed', never a harness
+    rejection — same contract as the codex and claude paths."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_bin_shim(
+        bin_dir, "dsh",
+        "@echo off\r\n"
+        "echo Error: authentication failed: 401 invalid api key\r\n"
+        "exit /b 1\r\n",
+        "#!/bin/sh\n"
+        'echo "Error: authentication failed: 401 invalid api key"\n'
+        "exit 1\n",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep
+                       + os.environ.get("PATH", ""))
+    monkeypatch.setattr(agents, "BACKEND", "deepseek")
+    with pytest.raises(agents.AgentAuthError, match="agent auth failed"):
+        agents.codex_exec("prompt", cwd=str(tmp_path))
+
+
+def test_deepseek_backend_missing_binary_raises_clear_error(
+        tmp_path, monkeypatch):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))  # no dsh anywhere
+    monkeypatch.setattr(agents, "BACKEND", "deepseek")
+    with pytest.raises(RuntimeError, match=r"`dsh` CLI was not found"):
+        agents.codex_exec("prompt", cwd=str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
 # unknown backend values
 # --------------------------------------------------------------------------- #
 
 def test_unknown_backend_raises_clear_error(monkeypatch):
     monkeypatch.setattr(agents, "BACKEND", "openai")
-    with pytest.raises(ValueError, match=r"codex\|mock\|claude"):
+    with pytest.raises(ValueError, match=r"codex\|mock\|claude\|deepseek"):
         agents.codex_exec("prompt", cwd=".")
     with pytest.raises(ValueError, match="unknown FDE_AGENT_BACKEND"):
         agents.codex_version()

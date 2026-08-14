@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="fde.bench", description="run the fixture corpus and render a report")
     ap.add_argument("--backend", default=os.environ.get("FDE_AGENT_BACKEND", "codex"),
-                    help="agent backend: codex (default), mock, or claude")
+                    help="agent backend: codex (default), mock, claude, or deepseek")
     ap.add_argument("--fixture", action="append", dest="fixtures", metavar="NAME",
                     help="restrict to a fixture dir name (repeatable)")
     args = ap.parse_args(argv)
