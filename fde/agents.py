@@ -29,6 +29,7 @@ from pathlib import Path
 from .config import load_repo_manifest
 from .harness import run_cmd, verify_repro
 from .runlog import append, run_dir
+from .sandbox import gold_path_in_sandbox
 from .ticket import parse_ticket
 
 BACKEND = os.environ.get("FDE_AGENT_BACKEND", "codex")
@@ -490,7 +491,7 @@ def _mock_apply_gold(cwd: str) -> None:
     run_id = wt.parent.name
     ticket = parse_ticket(run_dir(run_id) / "ticket.md")
     repo = resolve_repo(ticket["system"])
-    gold = (Path(repo) / "gold.patch").resolve()
+    gold = Path(gold_path_in_sandbox(str(Path(repo) / "gold.patch"), str(wt)))
     if not gold.is_file():
         raise RuntimeError(f"gold.patch not found at {gold}")
     r = subprocess.run(["git", "-C", str(wt), "apply", str(gold)],

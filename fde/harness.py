@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 from .runlog import append
-from .sandbox import run_in_docker, sandbox_active
+from .sandbox import gold_path_in_sandbox, run_in_docker, sandbox_active
 
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 SNIPPET_CHARS = 500
@@ -204,14 +204,22 @@ def _head(wt: Path) -> str:
 
 def _apply_gold(wt: Path, gold: Path, timeout: int = 120) -> dict:
     """git apply gold.patch into the worktree (CRLF-tolerant retry)."""
+    gold = Path(gold_path_in_sandbox(str(gold), str(wt)))
+    if sandbox_active():
+        # in-container: host paths resolve relative to /workspace, which is
+        # the worktree mount — use the container forms directly
+        wt_arg = "/workspace"
+        gold_arg = "/workspace/.fde-gold.patch"
+    else:
+        wt_arg = shlex.quote(str(wt))
+        gold_arg = shlex.quote(str(gold))
     apply_r = run_cmd(
-        f"git -C {shlex.quote(str(wt))} apply {shlex.quote(str(gold))}",
+        f"git -C {wt_arg} apply {gold_arg}",
         str(wt), timeout=timeout)
     if apply_r["rc"] != 0:
         # Windows CRLF tolerance: retry once ignoring whitespace differences
         apply_r = run_cmd(
-            f"git -C {shlex.quote(str(wt))} apply --ignore-whitespace "
-            f"{shlex.quote(str(gold))}",
+            f"git -C {wt_arg} apply --ignore-whitespace {gold_arg}",
             str(wt), timeout=timeout)
     return apply_r
 

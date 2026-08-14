@@ -334,3 +334,96 @@ def test_volume_arg_uses_abs_windows_form(tmp_path, monkeypatch):
     argv = _docker_argv(logs["args"])
     assert f"-v {os.path.abspath(str(work))}:/workspace" in argv
     assert "-v work:/workspace" not in argv
+
+
+def _fake_worktree(tmp_path) -> tuple[Path, Path]:
+    """A fixture repo (with .git) + a worktree whose .git is a FILE pointing
+    at the fixture's gitdir — exactly what `git worktree add` produces."""
+    fixture = tmp_path / "fixture"
+    (fixture / ".git" / "worktrees").mkdir(parents=True)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(
+        f"gitdir: {fixture}/.git/worktrees/wt1\n", encoding="utf-8")
+    return fixture, wt
+
+
+def test_sandbox_mounts_fixture_gitdir(tmp_path, monkeypatch):
+    """Worktree .git FILE -> the fixture's .git dir is bind-mounted at
+    /fde/gitdir and git is steered there via GIT_DIR/GIT_WORK_TREE -e flags
+    (in-container git works; the .git file is NEVER rewritten, nothing is
+    mounted under /workspace, host git stays untouched)."""
+    fixture, wt = _fake_worktree(tmp_path)
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    monkeypatch.setenv("FDE_SANDBOX_IMAGE", "testimg")
+    sb = _sandbox()
+
+    sb.run_in_docker("echo hi", str(wt), 30)
+
+    argv = _docker_argv(logs["args"])
+    # the fixture's .git dir mounted at the fixed /fde/gitdir path, POSIX-form
+    # (the mount arg is space-quoted by subprocess, so the shim logs it whole)
+    assert "--mount" in argv
+    assert (f"type=bind,source={(fixture / '.git').as_posix()},"
+            "target=/fde/gitdir") in argv
+    # git steering via explicit -e flags. The .cmd fake strips everything
+    # after '=' in UNQUOTED args (cmd.exe quirk), so assert the keys here;
+    # the full GIT_DIR/GIT_WORK_TREE values are covered by
+    # test_sandbox_git_env_steers_in_container_git and the real-docker
+    # integration tests.
+    assert "-e GIT_DIR" in argv
+    assert "-e GIT_WORK_TREE" in argv
+    # the .git file is untouched
+    assert (wt / ".git").read_text(encoding="utf-8")         .startswith(f"gitdir: {fixture}/")
+    # idempotent: second call derives the same mount, no churn
+    sb.run_in_docker("echo hi", str(wt), 30)
+    assert (wt / ".git").read_text(encoding="utf-8")         .startswith(f"gitdir: {fixture}/")
+
+
+def test_sandbox_git_env_steers_in_container_git(tmp_path, monkeypatch):
+    """GIT_DIR points at /fde/gitdir/worktrees/<name>, GIT_WORK_TREE at
+    /workspace — the container's git uses the mounted gitdir instead of the
+    unresolvable host path in the worktree's .git file."""
+    fixture, wt = _fake_worktree(tmp_path)
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    sb = _sandbox()
+
+    mounts, env = sb._sandbox_git_env(str(wt))
+
+    assert env["GIT_DIR"] == "/fde/gitdir/worktrees/wt1"
+    assert env["GIT_WORK_TREE"] == "/workspace"
+    assert mounts and "target=/fde/gitdir" in mounts[1]
+    # plain dir (no .git file) -> no mounts, no env steering
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert sb._sandbox_git_env(str(plain)) == ([], {})
+
+
+def test_sandbox_posix_gitdir_same_fixed_mount():
+    """POSIX gitdir (CI) — same fixed /fde/gitdir mount + GIT_DIR steering
+    (no path-specific container paths needed)."""
+    import fde.sandbox as sb
+    mt = sb._mount_target(
+        "/home/runner/work/ticket-to-fix/fixtures/tier6_escape/.git/worktrees/wt1")
+    assert mt is not None
+    git_dir, mount, name = mt
+    assert git_dir.as_posix() == "/home/runner/work/ticket-to-fix/fixtures/tier6_escape/.git"
+    assert mount == "/fde/gitdir"
+    assert name == "wt1"
+
+
+def test_sandbox_plain_dir_single_mount(tmp_path, monkeypatch):
+    """No .git file -> no extra mount, no git env (plain-dir behavior)."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    monkeypatch.setenv("FDE_SANDBOX_IMAGE", "testimg")
+    sb = _sandbox()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    sb.run_in_docker("echo hi", str(cwd), 30)
+
+    argv = _docker_argv(logs["args"])
+    assert "--mount" not in argv
+    assert argv.count("-v") == 1

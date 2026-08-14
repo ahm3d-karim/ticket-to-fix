@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import uuid
+from pathlib import Path
 
 VALID_SANDBOXES = ("", "docker")
 
@@ -85,6 +86,96 @@ def _best_effort(argv) -> None:
         pass
 
 
+def gold_path_in_sandbox(gold: str, wt: str) -> str:
+    """Return the gold.patch path usable from inside the sandbox.
+
+    Host mode: the path is returned unchanged (byte-identical behavior).
+
+    Sandbox mode: the container only sees the worktree mount at
+    ``/workspace``, so a patch living in the fixture repo (outside the
+    mount) is copied into the worktree first and the in-worktree path is
+    returned. The copy is untracked — the per-round ``git clean -fd``
+    restore removes it — and is (re)created on every call (idempotent
+    overwrite), so verify_repro's state B and state C each get a fresh copy
+    after the restore between states.
+    """
+    if not sandbox_active():
+        return gold
+    dst = Path(wt).resolve() / ".fde-gold.patch"
+    shutil.copy2(gold, dst)
+    return str(dst)
+
+
+def _gitdir_from_worktree(wt: str) -> str | None:
+    """Parse ``<wt>/.git`` (a FILE, as worktrees have) for its gitdir line.
+
+    Returns the absolute host path of the fixture's gitdir
+    (``<fixture>/.git/worktrees/<name>``), or None when cwd is not a
+    worktree (no .git file) or the line is unreadable.
+    """
+    try:
+        dotgit = Path(wt).resolve() / ".git"
+        if not dotgit.is_file():
+            return None
+        for line in dotgit.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("gitdir:"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _mount_target(gitdir: str) -> tuple[Path, str, str] | None:
+    """Compute (git_dir, container_mount, worktree_name) for a gitdir line.
+
+    The fixture's ``.git`` DIRECTORY is mounted at the fixed container path
+    ``/fde/gitdir`` and the container runs git with ``GIT_DIR`` pointing at
+    ``/fde/gitdir/worktrees/<name>`` (see :func:`_sandbox_git_env`) — the
+    worktree's own ``.git`` FILE is never rewritten, nothing is mounted
+    under ``/workspace``, and the fixture's source tree never appears in the
+    container (no node --test discovery pollution, no git clean side
+    effects, host git and bench cleanup keep working untouched).
+    """
+    gd = Path(gitdir)
+    # gitdir = <fixture>/.git/worktrees/<name>
+    if len(gd.parents) < 3:
+        return None
+    git_dir = gd.parents[1]             # <fixture>/.git
+    return git_dir, _GITDIR_MOUNT, gd.name
+
+
+_GITDIR_MOUNT = "/fde/gitdir"
+
+
+def _sandbox_git_env(cwd: str) -> tuple[list[str], dict]:
+    """(--mount argv pieces, env overrides) so in-container git works.
+
+    The harness's worktrees carry a ``.git`` FILE pointing at the fixture's
+    gitdir via an absolute HOST path — unresolvable inside the container.
+    Instead of rewriting it, the fixture's ``.git`` dir is bind-mounted at
+    ``/fde/gitdir`` and git is steered there with ``GIT_DIR`` +
+    ``GIT_WORK_TREE`` (env wins over discovery). Returns empty lists/dicts
+    when cwd is not a worktree or the gitdir is malformed (single-mount
+    behavior preserved).
+    """
+    gitdir = _gitdir_from_worktree(cwd)
+    if not gitdir:
+        return [], {}
+    mt = _mount_target(gitdir)
+    if mt is None:
+        return [], {}
+    git_dir, mount, name = mt
+    if not git_dir.is_dir():
+        return [], {}
+    # source must be POSIX-form: WindowsPath str() yields backslashes, which
+    # the docker CLI misreads as a volume name instead of a bind source
+    return (["--mount",
+             f"type=bind,source={git_dir.as_posix()},target={mount}"],
+            {"GIT_DIR": f"{mount}/worktrees/{name}",
+             "GIT_WORK_TREE": "/workspace"})
+
+
 def run_in_docker(cmd: str, cwd: str, timeout: int = 60) -> dict:
     """Run ``bash -c <cmd>`` inside an ephemeral sandbox container.
 
@@ -101,9 +192,17 @@ def run_in_docker(cmd: str, cwd: str, timeout: int = 60) -> dict:
     if not _daemon_ready(docker):
         raise RuntimeError(_DAEMON_DOWN_MSG)
     name = "fde-sandbox-" + uuid.uuid4().hex[:8]
+    volumes = [f"{os.path.abspath(cwd)}:/workspace"]
+    extra_mounts, git_env = _sandbox_git_env(cwd)
+    volume_args = [a for v in volumes for a in ("-v", v)]
+    # docker run does NOT inherit the CLI process env — git steering must be
+    # explicit -e flags for the container
+    env_args = [a for k, v in git_env.items() for a in ("-e", f"{k}={v}")]
     argv = [
         docker, "run", "--rm", "--name", name,
-        "-v", f"{os.path.abspath(cwd)}:/workspace",
+        *volume_args,
+        *extra_mounts,
+        *env_args,
         "-w", "/workspace",
         "--network", "none",
         "--cap-drop", "ALL",
