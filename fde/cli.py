@@ -2,7 +2,7 @@
 
 Commands:
   submit <ticket.md>        start a run from a ticket
-  status <run_id>           show run state + recent events
+  status <run_id>           show run state, recent events, verification verdict
   repro <run_id>            agent writes repro test; 3-state harness verifies
   fix <run_id>              agent fixes until repro test + suite pass; gates run
   diff <run_id>             print the evidence package
@@ -103,6 +103,41 @@ def cmd_submit(args) -> int:
     return 0
 
 
+def _verdict_reason(d: dict) -> str:
+    """Compact one-line reason for a run's verification verdict."""
+    if d["gates"] == "failed":
+        return "gates failed"
+    if d["rounds_vs_budget"]["exhausted"]:
+        return "budget exhausted"
+    if d["final_state"] == "failed":
+        return "run failed"
+    if not d["reached_awaiting_approval"]:
+        return "never reached awaiting approval"
+    if (d["repro_first_try"] is True and d["state_a_rejections"] == 0
+            and d["fix_rounds"] == 1 and d["gates"] == "passed"
+            and d["final_state"] != "rejected"):
+        return "repro 1st try, 1 round, gates passed"
+    parts = []
+    if d["repro_first_try"] is not True or d["state_a_rejections"] > 0:
+        parts.append("repro retried")
+    if d["fix_rounds"] > 1:
+        parts.append(f"{d['fix_rounds']} rounds")
+    if d["gates"] != "passed":
+        parts.append(f"gates {d['gates']}")
+    if d["final_state"] == "rejected":
+        parts.append("rejected by human")
+    return ", ".join(parts) or "harness verified, but with retries/rejections"
+
+
+def _status_verdict_line(run_id: str) -> str | None:
+    """One-line verification verdict for a run; None when unreadable."""
+    try:
+        d = verify.summarize_run(str(run_dir(run_id)))
+    except Exception:
+        return None
+    return f"verdict: {verify.verdict(d)} ({_verdict_reason(d)})"
+
+
 def cmd_status(args) -> int:
     run_id = args.run_id
     log = RUNS_DIR / run_id / "run.jsonl"
@@ -115,6 +150,9 @@ def cmd_status(args) -> int:
     print(f"events (last {min(5, len(evs))} of {len(evs)}):")
     for e in evs[-5:]:
         print(f"  {e['ts']} {e['event']} {e['data']}")
+    verdict_line = _status_verdict_line(run_id)
+    if verdict_line:
+        print(verdict_line)
     print("artifacts:")
     found = False
     for name in ("ticket.md", FIX_COMMIT_FILE, "repro.test.js", "repro_test.py"):
