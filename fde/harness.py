@@ -23,20 +23,31 @@ is how the CLI always creates it.
 """
 import re
 import shlex
+import shutil
 import subprocess
 import time
 from pathlib import Path
 
 from .runlog import append
+from .sandbox import run_in_docker, sandbox_active
 
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 SNIPPET_CHARS = 500
 
+# Resolve bash via PATH instead of letting CreateProcess find it: Windows
+# searches System32 BEFORE PATH, so on WSL-enabled hosts a bare "bash" in
+# Popen resolves to the WSL relay stub (System32\bash.exe), which dies with
+# "WSL (9 - Relay) ERROR ... execvpe(/bin/bash) failed" — observed on a
+# machine right after WSL2 was enabled (the suite's repo commands all broke).
+_BASH = shutil.which("bash") or "bash"
+
 
 def run_cmd(cmd: str, cwd: str, timeout: int = 60) -> dict:
     """Run ``bash -c <cmd>`` in cwd. Returns {"rc", "out", "timed_out"}."""
+    if sandbox_active():
+        return run_in_docker(cmd, str(cwd), timeout)
     proc = subprocess.Popen(
-        ["bash", "-c", cmd], cwd=cwd,
+        [_BASH, "-c", cmd], cwd=cwd,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         creationflags=CREATE_NEW_PROCESS_GROUP,
     )
