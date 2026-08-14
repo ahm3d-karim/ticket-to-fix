@@ -74,10 +74,27 @@ def codex_version() -> str:
         return "unknown"
 
 
+def ensure_git_repo(repo: Path) -> None:
+    """Fixture repos are git repos by design, but their .git dirs are
+    gitignored, so a fresh checkout (CI) has none. Initialize with a baseline
+    commit on `main` when missing — the harness adds detached worktrees of
+    `main`, which requires a repo with a commit. No-op when present."""
+    if (repo / ".git").exists():
+        return
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"],
+                   check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"],
+                   check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=fde",
+                    "-c", "user.email=fde@local", "commit", "-m", "baseline"],
+                   check=True, capture_output=True, text=True)
+
+
 def resolve_repo(system: str) -> str:
     """Map a ticket's `system` field to a repo dir carrying fde.yaml."""
     for cand in (Path("fixtures") / system, Path(system)):
         if (cand / "fde.yaml").exists():
+            ensure_git_repo(cand)
             return str(cand.resolve())
     raise FileNotFoundError(
         f"no repo with fde.yaml found for system '{system}' "

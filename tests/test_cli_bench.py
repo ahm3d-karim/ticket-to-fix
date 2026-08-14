@@ -7,10 +7,11 @@ leave their runs under the gitignored runs/ dir.
 """
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PY = ROOT / ".venv" / "Scripts" / "python.exe"
+PY = sys.executable
 
 
 def _cli(*args: str, backend: str = "mock") -> subprocess.CompletedProcess:

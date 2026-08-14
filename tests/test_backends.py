@@ -26,9 +26,22 @@ FAKE_REPLY = json.dumps({
 })
 
 
+def _write_claude_shim(bin_dir: Path, body_cmd: str, body_sh: str) -> None:
+    """Write a fake `claude` CLI: `claude.cmd` on Windows, an executable
+    POSIX script elsewhere (CI runners are Linux; a bare `claude` name does
+    not resolve to `claude.cmd` there — the backend's shutil.which lookup is
+    exactly what these tests exercise)."""
+    if os.name == "nt":
+        (bin_dir / "claude.cmd").write_text(body_cmd, encoding="utf-8")
+    else:
+        script = bin_dir / "claude"
+        script.write_text(body_sh, encoding="utf-8")
+        script.chmod(0o755)
+
+
 @pytest.fixture
 def fake_claude(tmp_path, monkeypatch):
-    """Put a fake `claude` CLI (claude.cmd) on PATH.
+    """Put a fake `claude` CLI on PATH.
 
     Logs its argv and working directory to files, prints a JSON result
     object (the `claude -p --output-format json` shape), and answers
@@ -38,8 +51,8 @@ def fake_claude(tmp_path, monkeypatch):
     bin_dir.mkdir()
     args_log = tmp_path / "args.txt"
     cwd_log = tmp_path / "cwd.txt"
-    script = bin_dir / "claude.cmd"
-    script.write_text(
+    _write_claude_shim(
+        bin_dir,
         "@echo off\r\n"
         'if "%1"=="--version" (\r\n'
         "  echo claude-cli 2.0.0-fake\r\n"
@@ -49,7 +62,15 @@ def fake_claude(tmp_path, monkeypatch):
         f'echo %CD% > "{cwd_log}"\r\n'
         f"echo {FAKE_REPLY}\r\n"
         "exit /b 0\r\n",
-        encoding="utf-8",
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then\n'
+        '  echo "claude-cli 2.0.0-fake"\n'
+        "  exit 0\n"
+        "fi\n"
+        f'echo "$*" > "{args_log}"\n'
+        f'echo "$PWD" > "{cwd_log}"\n'
+        f"echo '{FAKE_REPLY}'\n"
+        "exit 0\n",
     )
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep
                        + os.environ.get("PATH", ""))
@@ -94,11 +115,14 @@ def test_claude_backend_401_raises_agent_auth_error(tmp_path, monkeypatch):
     rejection — same contract as the codex path."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "claude.cmd").write_text(
+    _write_claude_shim(
+        bin_dir,
         "@echo off\r\n"
         "echo Error: authentication failed: 401 invalid api key\r\n"
         "exit /b 1\r\n",
-        encoding="utf-8",
+        "#!/bin/sh\n"
+        'echo "Error: authentication failed: 401 invalid api key"\n'
+        "exit 1\n",
     )
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep
                        + os.environ.get("PATH", ""))

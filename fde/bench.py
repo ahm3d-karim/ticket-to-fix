@@ -198,6 +198,15 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     results = run_corpus(backend=args.backend, fixtures=args.fixtures)
     print(render_report(results))
+    # corpus gate: tier5_outofscope is DESIGNED to fail at the security gate
+    # (its only correct fix embeds a credential — see README "When it fails");
+    # any other failed fixture is a regression the gate must flag.
+    bad = [r["fixture"] for r in results
+           if r["state"] == "failed" and r["fixture"] != "tier5_outofscope"]
+    if bad:
+        print(f"bench gate FAILED — unexpected failures: {', '.join(bad)}",
+              file=sys.stderr)
+        return 1
     return 0
 
 
