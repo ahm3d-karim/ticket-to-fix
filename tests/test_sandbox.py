@@ -432,12 +432,21 @@ def test_sandbox_plain_dir_single_mount(tmp_path, monkeypatch):
 # --- Real-docker integration tests (skip when no daemon) -----------------
 
 def _docker_available() -> bool:
+    """True when the docker daemon answers AND the fde-sandbox:latest image
+    exists (the integration tests exercise the real image; the sandbox CI
+    job builds it, so on a fresh runner they skip instead of failing with
+    docker rc 125 'repository does not exist')."""
     try:
         import subprocess
         r = subprocess.run(
             ["docker", "version", "--format", "{{.Server.Version}}"],
             capture_output=True, text=True, timeout=10)
-        return r.returncode == 0 and bool(r.stdout.strip())
+        if not (r.returncode == 0 and bool(r.stdout.strip())):
+            return False
+        r = subprocess.run(
+            ["docker", "image", "inspect", "fde-sandbox:latest"],
+            capture_output=True, text=True, timeout=10)
+        return r.returncode == 0
     except Exception:
         return False
 
