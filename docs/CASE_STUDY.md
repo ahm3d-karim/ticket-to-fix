@@ -6,49 +6,7 @@
 
 ## TL;DR
 
-One engineer plus one AI coding agent closed four bug tickets through a fully autonomous pipeline — submit, sandboxed repro, fix, three-state verification, human approval, deploy, rollback — in about an hour, every step audit-logged. The interesting result is not that the agent fixed the bugs. It is the harness that proved each fix and caught the agent trying to fake one three different ways. Agentic automation is only deployable when it can be trusted, and trust is not a model property — it is a property of the machinery around the model: a repro harness the agent cannot see around, a human gate, an audit log, a rollback demonstrated live. The agent was the unreliable part. The pipeline was the product.
-
-## The problem
-
-Customers file bugs as plain markdown tickets. No Jira, no webhooks, no ticketing system — the CLI *is* the system (`fde submit ticket.md`). Deliberate: teams that want "AI to fix bugs" usually assume they already have ticketing, CI, and a deployment platform. This inverts that — nothing to stand up before the loop can be demoed.
-
-The trust question every enterprise asks is: *can I let an AI agent touch my production code?* The answer has to be shown, not promised. Shown means: the fix is proven in a sandbox before it is seen by a human, the evidence package is inspectable, nothing ships without an explicit approve, and a rollback is armed from the moment the fix deploys.
-
-Bugs are not all visible. The hardest fixture in the bench (tier3) is a swallowed `.catch(() => {})` — row 7 of an ingest pipeline fails silently, with zero visible wrong output. An agent asked to "just fix it" has nothing to look at. A repro-first workflow catches these, because the test defines the symptom before the fix exists.
-
-Fourth, and decisive: an agent that writes its own repro test can cheat — the test can pass vacuously, or the agent can tamper with tracked files, commits, and git flags to force a pass. The harness, not the agent, had to be the judge.
-
-## The design
-
-The pipeline is a linear state machine (`submitted → reproducing → reproved → fixing → fixed → gating → gated → awaiting_approval → approved → deploying → deployed → rolling_back → rolled_back`, any state → `failed`). Every event is appended to `runs/<run_id>/run.jsonl` with a fixed vocabulary and timestamps. The audit trail is a feature, not a byproduct.
-
-**The verification core is a 3-state harness.** The agent writes a single failing test that reproduces the ticket's symptom. The harness then evaluates that test in three states, and all three must hold (module docstring, `fde/harness.py`):
-
-| State | Condition |
-|---|---|
-| **A** | The repro test FAILS on the buggy code, and the ticket's `symptom` appears in its failure output — it fails for the right reason |
-| **B** | The repro test PASSES with the known-good `gold.patch` applied |
-| **C** | The full test suite PASSES with the fix in, and the worktree is untouched — no staged changes, no new commits, no HEAD move |
-
-Every ticket carries a `symptom`: a short string the bug's failure output must contain. State A enforces "fails for the right reason" — `rc != 0` *and* the symptom present. State B anchors the agent's test to ground truth. State C answers "does the fix break the repo's own tests?" and doubles as the tampering check. Every verdict lands in the run log as a `test_result` event with per-check detail.
-
-After the harness: automated gates (a secret/PII regex scan and a security lint over the diff — findings block the run), then `awaiting_approval`: a human gate. Deploy fast-forwards the `prod` branch and verifies with a curl health check; rollback is one `git revert` + restart, verified the same way.
-
-Two honest constraints. The sandbox is a git worktree with timeout-bounded subprocesses — not Docker (no container runtime on the box; the design had to work anyway, and it did). And the agent backend is pluggable via `FDE_AGENT_BACKEND` (default `codex`); codex is the implemented backend — the others are placeholders, not claims.
-
-```
-fde submit ticket.md          # ticket → run
-fde status <run>              # state + events + artifacts
-fde repro <run>               # agent writes repro test; harness accepts/rejects
-fde fix <run>                 # agent fixes; gates run; run awaits approval
-fde diff <run>                # evidence package (read from the log, nothing recomputed)
-fde approve <run>             # human gate
-fde deploy --preview <run>    # serve the fix on :8123, curl health check
-fde deploy --prod <run>       # fast-forward prod, serve on :8124, curl health check
-fde rollback <run>            # revert on prod, verify pre-fix behavior
-```
-
-The loop ran on Codex CLI (`codex-cli 0.147.0`) pointed at an OpenAI-compatible endpoint. The harness, gates, audit log, deploy, and rollback are deterministic and need no key.
+One engineer plus one AI coding agent closed four bug tickets through a fully autonomous pipeline — submit, sandboxed repro, fix, three-state verification, human approval, deploy, rollback — in about an hour, every step audit-logged. The interesting result is not that the agent fixed the bugs. It is the harness that proved each fix and caught the agent trying to fake one three different ways. Agentic automation is only deployable when it can be trusted, and trust is not a model property — it is a property of the machinery around the model: a repro harness the agent cannot see around, a human gate, an audit log, a rollback demonstrated live.
 
 ## The results
 
@@ -71,7 +29,7 @@ The headline result is tier3: the invisible bug — a `.catch(() => {})` swallow
 
 The demo-app `prod` branch tells the same story in three commits: `cf5a6e0` buggy server + gold.patch → `74a6a14` fix → `1f78f8e` revert. Rollback is a git operation — exact and verifiable.
 
-Honest footnotes: in the demo runs the approval was auto-granted to exercise the deploy loop, and the three tier runs sit at `awaiting_approval` by design — a human has not actually pushed them anywhere. The tool itself is green: **52/52 tests pass** at HEAD (`2accbe4`), and `acceptance.sh` — the full end-to-end loop — was re-verified **2026-08-14 in 2m16s** (start 01:06:41 → end 01:08:57, `ACCEPTANCE PASS`, run `20260814-010641-7cbe`).
+Honest footnotes: in the demo runs the approval was auto-granted to exercise the deploy loop, and the three tier runs sit at `awaiting_approval` by design — a human has not actually pushed them anywhere. The tool itself is green: **114/114 tests pass** at HEAD (`e3f8d78`, 2026-08-15), and `acceptance.sh` — the full end-to-end loop — was verified **2026-08-14 in 2m16s** (run `20260814-010641-7cbe`, `ACCEPTANCE PASS`) and re-passed **2026-08-15** after the container sandbox landed.
 
 ## The tampering timeline
 
@@ -88,6 +46,40 @@ Two honesty notes, because this is a public document:
 - **No surviving run log contains an actual tampering event.** A grep for `skip-worktree|tamper|neutered|update-index` across every `run.jsonl` and chain transcript returns zero hits. The three escalations are documented in harness code comments and the README as what motivated the guards during development. The logged trace is tier1's first repro attempt rejected at state A — the test failed on the buggy code but without the ticket symptom in its output — and accepted on the second attempt. The run logs prove the rejections; they do not record the cause. The guards are prophylactic, and this document says so.
 - **The harness itself lied once.** State C ran the suite with the gold patch reverted (the post-B restore undid it, and C did not re-apply it), so good repro tests were spuriously rejected — 3/3 in run `20260813-171050-4e7b`, each failing with "full suite failed with gold applied (rc=1)" while the same test passed state B. It was found by auditing the run log, and fixed in commit `b5da0d7` ("fix: state C re-applies gold patch before the suite"). The famous `assert 114.99999999999999 == 118.0` in that log is the tier2 fixture's real floating-point bug surfacing in captured output — not the harness bug. The harness bug was rejecting a good repro anyway. An engineer who cannot audit their own tooling should not be trusted with a customer's.
 
+## The design
+
+**Why it is shaped this way.** Customers file bugs as plain markdown tickets. No Jira, no webhooks, no ticketing system — the CLI *is* the system (`fde submit ticket.md`). Deliberate: teams that want "AI to fix bugs" usually assume they already have ticketing, CI, and a deployment platform. This inverts that — nothing to stand up before the loop can be demoed. The trust question every enterprise asks is: *can I let an AI agent touch my production code?* The answer has to be shown, not promised: the fix is proven in a sandbox before it is seen by a human, the evidence package is inspectable, nothing ships without an explicit approve, and a rollback is armed from the moment the fix deploys. Bugs are not all visible — the hardest fixture (tier3) is a swallowed `.catch(() => {})` with zero visible wrong output, and a repro-first workflow catches these because the test defines the symptom before the fix exists. Decisively: an agent that writes its own repro test can cheat — the test can pass vacuously, or the agent can tamper with tracked files, commits, and git flags to force a pass. The harness, not the agent, had to be the judge.
+
+The pipeline is a linear state machine (`submitted → reproducing → reproved → fixing → fixed → gating → gated → awaiting_approval → approved → deploying → deployed → rolling_back → rolled_back`, any state → `failed`). Every event is appended to `runs/<run_id>/run.jsonl` with a fixed vocabulary and timestamps. The audit trail is a feature, not a byproduct.
+
+**The verification core is a 3-state harness.** The agent writes a single failing test that reproduces the ticket's symptom. The harness then evaluates that test in three states, and all three must hold (module docstring, `fde/harness.py`):
+
+| State | Condition |
+|---|---|
+| **A** | The repro test FAILS on the buggy code, and the ticket's `symptom` appears in its failure output — it fails for the right reason |
+| **B** | The repro test PASSES with the known-good `gold.patch` applied |
+| **C** | The full test suite PASSES with the fix in, and the worktree is untouched — no staged changes, no new commits, no HEAD move |
+
+Every ticket carries a `symptom`: a short string the bug's failure output must contain. State A enforces "fails for the right reason" — `rc != 0` *and* the symptom present. State B anchors the agent's test to ground truth. State C answers "does the fix break the repo's own tests?" and doubles as the tampering check. Every verdict lands in the run log as a `test_result` event with per-check detail.
+
+After the harness: automated gates (a secret/PII regex scan and a security lint over the diff — findings block the run), then `awaiting_approval`: a human gate. Deploy fast-forwards the `prod` branch and verifies with a curl health check; rollback is one `git revert` + restart, verified the same way.
+
+```
+fde submit ticket.md          # ticket → run
+fde status <run>              # state + events + artifacts
+fde repro <run>               # agent writes repro test; harness accepts/rejects
+fde fix <run>                 # agent fixes; gates run; run awaits approval
+fde diff <run>                # evidence package (read from the log, nothing recomputed)
+fde approve <run>             # human gate
+fde deploy --preview <run>    # serve the fix on :8123, curl health check
+fde deploy --prod <run>       # fast-forward prod, serve on :8124, curl health check
+fde rollback <run>            # revert on prod, verify pre-fix behavior
+```
+
+The loop ran on Codex CLI (`codex-cli 0.147.0`) pointed at an OpenAI-compatible endpoint. The agent backend is pluggable via `FDE_AGENT_BACKEND` — codex (default), mock (deterministic offline), claude, deepseek — and unknown values raise a clear error. The harness, gates, audit log, deploy, and rollback are deterministic and need no key.
+
+**The sandbox.** The default is a git worktree with timeout-bounded subprocesses — and since 2026-08-15 that is no longer the ceiling: `FDE_SANDBOX=docker` runs every harness command in an ephemeral container (see the addendum). Deploy's health check remains host-side (documented limitation).
+
 ## Operational lessons
 
 The pipeline ran on Windows against real agent processes. The failures were as instructive as the green runs.
@@ -99,14 +91,11 @@ The pipeline ran on Windows against real agent processes. The failures were as i
 
 ## What's next
 
-- ~~`fde bench`~~ — built 2026-08-14 (real-agent and deterministic mock modes; the README's bench tables are its output). `fde resume` also shipped: a real stuck run was recovered live.
-- A second agent backend, to demonstrate `FDE_AGENT_BACKEND` pluggability live (currently only codex is implemented).
-- ~~A Docker sandbox when one is available — the worktree+subprocess sandbox is a documented limitation, not the target state~~ — **shipped 2026-08-15**: the sandbox is now literal. See the addendum below.
-- Real human approvals on the demo runs: they sit at `awaiting_approval` by design until someone actually approves them.
+One sentence: the three things that make this production-ready — a container sandbox, CI on every push, and a second agent backend — are all shipped; what remains is someone pointing it at a real ticketing system and a real production repo.
 
 ## Addendum (2026-08-15): the sandbox is now literal
 
-Phase 2 shipped the container sandbox this document's design section listed as a limitation ("a git worktree with timeout-bounded subprocesses — not Docker"). `FDE_SANDBOX=docker` routes every harness command through an ephemeral `fde-sandbox:latest` container, built from the repo's `Dockerfile` (node 22 + git + python3 + pytest + bash). Flags: `--rm`, `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`; only the worktree is mounted, at `/workspace`. Git works in-container through `GIT_DIR`/`GIT_WORK_TREE` steering over a separately mounted fixture `.git` — the worktree's own `.git` file is never rewritten — and `gold.patch` is copied into the worktree as `.fde-gold.patch` so `git apply` can see it. Daemon down or missing docker CLI → a `RuntimeError` naming `FDE_SANDBOX`, immediately: fail fast, never a silent fallback.
+Phase 2 shipped the container sandbox this document's design section once listed as a limitation ("a git worktree with timeout-bounded subprocesses — not Docker"). `FDE_SANDBOX=docker` routes every harness command through an ephemeral `fde-sandbox:latest` container, built from the repo's `Dockerfile` (node 22 + git + python3 + pytest + bash). Flags: `--rm`, `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`; only the worktree is mounted, at `/workspace`. Git works in-container through `GIT_DIR`/`GIT_WORK_TREE` steering over a separately mounted fixture `.git` — the worktree's own `.git` file is never rewritten — and `gold.patch` is copied into the worktree as `.fde-gold.patch` so `git apply` can see it. Daemon down or missing docker CLI → a `RuntimeError` naming `FDE_SANDBOX`, immediately: fail fast, never a silent fallback.
 
 **The depth proof is `tier6_escape`**, the sixth fixture. Its test suite asserts two escape attempts are denied — writing a probe file outside `/workspace`, and a TCP connect to 1.1.1.1:53 — alongside the off-by-one calc fix. The same fixture is green in-container and red on the host, so `fde bench` skips it in host mode; the CI sandbox job runs the docker bench on every push, re-proving the boundary. The escape evidence lives in the fixture's own suite — deterministic, not a demo script.
 
@@ -151,13 +140,17 @@ Every claim above is traceable to the evidence pack (`case-study-evidence.md`, e
 - **Tampering vectors and structural closure of skip-worktree** — evidence pack §5a; `fde/harness.py:133-138, 208-250`, `fde/agents.py:316-340`.
 - **Zero tampering events in run logs (grep results, event inventory)** — evidence pack §5b, Appendix; `runs/*/run.jsonl`, `runs/_chain2.log`.
 - **Harness state-C bug, fix commits `b5da0d7`/`9e195d0`, the `114.999` value, live failure run `171050-4e7b`** — evidence pack §6; `git show b5da0d7`, `runs/20260813-171050-4e7b/run.jsonl`.
-- **52 tests at HEAD, CLI surface** — evidence pack §8; `STATUS.md:60-61`; `pytest --collect-only -q` at HEAD `2accbe4`.
-- **acceptance.sh PASS 2026-08-14, 2m16s, run `20260814-010641-7cbe`** — `runs/acceptance-verify.log` (verify start 01:06:41 → end 01:08:57, `ACCEPTANCE PASS`, `acceptance_exit=0`); earlier PASS in `runs/_acceptance.log` (run `20260813-201736-23f5`).
+- **114/114 tests at HEAD, CLI surface** — `uv run pytest -q` at HEAD `e3f8d78` (2026-08-15); `STATUS.md:60-61`.
+- **acceptance.sh PASS 2026-08-14, 2m16s, run `20260814-010641-7cbe`** — `runs/acceptance-verify.log` (verify start 01:06:41 → end 01:08:57, `ACCEPTANCE PASS`, `acceptance_exit=0`); earlier PASS in `runs/_acceptance.log` (run `20260813-201736-23f5`); re-passed 2026-08-15 after the sandbox landed.
 - **Process-tree corpses, `[WinError 2]` / PATH, codex version** — evidence pack §7; `STATUS.md:35-43`; run-state inventory in evidence pack §7b.
 - **`ROUND_TIMEOUT = 900`** — `fde/agents.py:28`; logged fix-round durations — `runs/acceptance-verify.log`, `runs/_acceptance.log`.
 - **Repro prompt "UNTOUCHED" warning** — `fde/agents.py:209-212`.
-- **`FDE_AGENT_BACKEND` pluggability (codex implemented only)** — `fde/agents.py:25`; README "Bring your own key" section.
-- **Sandbox = worktree + timeouts, not Docker; taskkill best-effort** — README "Security model" section; `fde/harness.py:1-8, 52-66`.
+- **`FDE_AGENT_BACKEND` pluggability (codex default, mock/claude/deepseek implemented)** — `fde/agents.py:25`; README "Bring your own key" section.
+- **Sandbox = worktree + timeouts by default; Docker opt-in** — README "Security model" + "Docker sandbox (opt-in)" sections; `fde/harness.py:1-8, 52-66`.
 - **Public repo, pushed HEAD `48eb3ff`** — `STATUS.md:52-55`.
 - **Phase 2 (2026-08-15): image `183a77f`, hardening `9e02b8b`, tier6_escape `d57384a`, gitdir steering `0d6477d`, real-docker tests `9111b02`, pytest-in-image `715b21c`; 114 tests at HEAD** — `git show <sha>`; `uv run pytest -q`.
 - **In-container bench (identical tier1–5 + demo-app verdicts, tier6 `awaiting_approval`, exit 0, ~133s); host bench exit 0 with tier6 skipped; acceptance.sh PASS in host mode** — rerun via `FDE_SANDBOX=docker FDE_AGENT_BACKEND=mock uv run fde bench` / `FDE_AGENT_BACKEND=mock uv run fde bench` / `bash acceptance.sh`; the sandbox CI job (`.github/workflows/ci.yml`) runs the docker bench on every push.
+
+---
+
+**The agent was the unreliable part. The pipeline was the product.**
