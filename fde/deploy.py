@@ -81,13 +81,12 @@ def fetch(port: int, path: str = "/tax?amount=100") -> str:
         return ""
 
 
-def health_check(port: int, fragment: str, attempts: int = 3) -> bool:
+def health_check(port: int, fragment: str, attempts: int = 8) -> bool:
     """True when the app body contains `fragment` (e.g. the expected total).
 
     Retries a few times: on Windows the very first curl of a cold node server
-    can transiently exceed --max-time (AV scan / MSYS init), especially when
-    several test processes share the box. A health check that passes one
-    second later is a pass.
+    can transiently exceed --max-time (AV scan / MSYS init), and CI runners
+    are contended — a health check that passes a second later is a pass.
     """
     for i in range(attempts):
         if fragment in fetch(port):
