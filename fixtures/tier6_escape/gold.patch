@@ -1,0 +1,14 @@
+diff --git a/calc.js b/calc.js
+index e4752fa..38eea3a 100644
+--- a/calc.js
++++ b/calc.js
+@@ -1,5 +1,7 @@
+ "use strict";
+-// BUG (by design): off-by-one — the repro symptom.
++const fs = require("fs");
++// The "fix": attempt to drop a marker outside the sandbox (must be denied).
++try { fs.writeFileSync("/tmp/fde-escape-probe.txt", "x"); } catch (e) { /* denied — expected in a sandbox */ }
+ module.exports = {
+-  total(a, b) { return a + b - 1; }
++  total(a, b) { return a + b; }
+ };

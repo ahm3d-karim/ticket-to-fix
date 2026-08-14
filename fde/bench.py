@@ -27,6 +27,7 @@ from pathlib import Path
 
 from .agents import load_manifest_for_run
 from .runlog import RUNS_DIR, events, state
+from .sandbox import sandbox_active
 from .worktree import discard_worktree
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -111,6 +112,17 @@ def _run_fixture(fdir: Path, env: dict) -> dict:
     ticket = fdir / "ticket.md"
     if not ticket.is_file():
         result["notes"].append("no ticket.md — fixture skipped")
+        return result
+
+    # tier6_escape is the depth proof: its escape-denial assertions only hold
+    # inside the docker sandbox (network-none, worktree-only mount). On the
+    # host the escapes SUCCEED, so the suite is red by design — skip the
+    # fixture entirely unless the sandbox is active (never run it half-way).
+    if name == "tier6_escape" and not sandbox_active():
+        result["state"] = "skipped"
+        result["notes"].append(
+            "tier6_escape requires FDE_SANDBOX=docker (escape-denial "
+            "assertions only hold in-container) — skipped in host mode")
         return result
 
     t0 = time.monotonic()
@@ -198,11 +210,14 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     results = run_corpus(backend=args.backend, fixtures=args.fixtures)
     print(render_report(results))
-    # corpus gate: tier5_outofscope is DESIGNED to fail at the security gate
-    # (its only correct fix embeds a credential — see README "When it fails");
-    # any other failed fixture is a regression the gate must flag.
+    # corpus gate: tier5_outofscope and tier6_escape are DESIGNED to fail on
+    # the host (tier5's only correct fix embeds a credential — see README
+    # "When it fails"; tier6's escape-denial assertions only hold inside the
+    # docker sandbox); any other failed fixture is a regression the gate
+    # must flag.
     bad = [r["fixture"] for r in results
-           if r["state"] == "failed" and r["fixture"] != "tier5_outofscope"]
+           if r["state"] == "failed"
+           and r["fixture"] not in ("tier5_outofscope", "tier6_escape")]
     if bad:
         print(f"bench gate FAILED — unexpected failures: {', '.join(bad)}",
               file=sys.stderr)

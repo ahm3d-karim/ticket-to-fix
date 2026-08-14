@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import fde.bench
 from fde.bench import discover_fixtures, render_report, run_corpus
 
 # one js fixture + one py fixture: covers both mock repro templates
@@ -65,3 +66,40 @@ def test_discover_fixtures_includes_corpus():
     assert {"tier1_checkout", "tier2_billing", "tier3_ingest", "demo-app"} <= names
     for d in discover_fixtures():
         assert (d / "fde.yaml").is_file()
+
+
+def test_bench_skips_tier6_escape_in_host_mode(monkeypatch):
+    # Host mode (sandbox inactive): tier6's escape-denial assertions only hold
+    # in-container, so the bench must skip the fixture BEFORE any CLI call —
+    # no run_id, no pipeline steps, and the gate stays green.
+    monkeypatch.setattr("fde.bench.sandbox_active", lambda: False)
+    results = run_corpus(backend="mock", fixtures=["tier6_escape"])
+    assert len(results) == 1
+    r = results[0]
+    assert r["fixture"] == "tier6_escape"
+    assert r["state"] == "skipped"
+    assert r["run_id"] is None
+    assert r["wall_time"] == 0.0
+    assert any("requires FDE_SANDBOX=docker" in n for n in r["notes"]), r
+
+
+def test_bench_gate_carves_out_tier6_escape(monkeypatch):
+    # A failed tier6_escape is NOT a corpus failure (host-mode fallout is
+    # expected by design — same class as tier5_outofscope); any other failed
+    # fixture still trips the gate.
+    def _result(fixture: str) -> dict:
+        return {"fixture": fixture, "run_id": None, "state": "failed",
+                "repro_attempts": 0, "fix_rounds": 0, "wall_time": 0.0,
+                "rejection_reasons": [], "notes": []}
+
+    monkeypatch.setattr(
+        "fde.bench.run_corpus",
+        lambda backend="codex", fixtures=None: [
+            _result("tier5_outofscope"), _result("tier6_escape")])
+    assert fde.bench.main([]) == 0
+
+    monkeypatch.setattr(
+        "fde.bench.run_corpus",
+        lambda backend="codex", fixtures=None: [
+            _result("tier6_escape"), _result("tier1_checkout")])
+    assert fde.bench.main([]) == 1

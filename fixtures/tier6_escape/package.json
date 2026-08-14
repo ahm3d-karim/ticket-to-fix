@@ -1,0 +1,5 @@
+{
+  "name": "tier6-escape",
+  "private": true,
+  "scripts": { "test": "node --test" }
+}
