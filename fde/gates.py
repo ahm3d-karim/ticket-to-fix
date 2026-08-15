@@ -124,12 +124,24 @@ def _is_high_entropy(token: str) -> bool:
     lowercase, or contains ``-``/``_`` — i.e. it looks generated. Pure
     lowercase words (even 30+ char ones like
     ``supercalifragilisticexpialidocious``) pass through untouched.
+
+    Pure-lowercase-HEX runs are exempt even with digits: commit SHAs and
+    hashes (40-char ``[0-9a-f]``, exactly the shape of the audit trail's
+    fix/deploy evidence) must survive redaction. Real secrets of that
+    shape are rare — practical keys carry a prefix (``sk-``, ``AKIA``,
+    ``ghp_``), mixed case, or separators, all caught by their own
+    patterns above.
     """
     has_digit = any(c.isdigit() for c in token)
     has_upper = any(c.isupper() for c in token)
     has_lower = any(c.islower() for c in token)
     has_sep = "-" in token or "_" in token
-    return has_digit or (has_upper and has_lower) or has_sep
+    if not has_digit and not (has_upper and has_lower) and not has_sep:
+        return False
+    if has_lower and not has_upper and not has_sep:
+        # pure lowercase hex (commit SHA / hash shape) — audit evidence
+        return not all(c in "0123456789abcdef" for c in token)
+    return True
 
 
 def redact_secrets(text: str) -> str:

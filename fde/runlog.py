@@ -4,6 +4,8 @@ import secrets
 import datetime
 from pathlib import Path
 
+from .gates import redact_event_data
+
 RUNS_DIR = Path("runs")
 EVENTS = {"ticket_parsed","worktree_created","repro_test_written","test_result",
           "fix_attempt","gates_passed","gates_failed","evidence_packaged",
@@ -59,6 +61,10 @@ def _tail_hash(p: Path) -> str | None:
 def append(run_id: str, event: str, data: dict | None = None):
     if event not in EVENTS:
         raise ValueError(f"unknown event: {event}")
+    if data:
+        # secrets never reach the log: redact before the line is built (the
+        # written line is the hash-chain source of truth)
+        data = redact_event_data(data)
     line = {"ts": datetime.datetime.now().isoformat(), "run_id": run_id,
             "event": event, "data": data or {}}
     p = run_dir(run_id) / "run.jsonl"

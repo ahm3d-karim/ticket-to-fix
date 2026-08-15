@@ -147,7 +147,8 @@ OPENAI_KEY = "sk-abc123DEF456ghi789JKL012mno345"
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 GH_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 GH_PAT = "github_pat_ABCDEFGH_abcdefghijklmnopqrstuvwxyz0123456789_XYZ"
-HEX_TOKEN = "a1b2c3d4e5f6" * 4  # 48 chars, digits -> high entropy
+HEX_TOKEN = "A1b2C3d4e5F6" * 4  # 48 chars, mixed case -> high entropy
+SHA_SHAPE = "6d03b767c9ca378565545e0f2d9515ad0e88ecb4"  # 40-char pure hex
 B64_TOKEN = "dGhpc2lzYXNlY3JldHRva2VudmVyeWxvbmcxMjM0NTY="  # 44 chars
 PEM_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n"
@@ -191,6 +192,13 @@ def test_redact_pem_openssh_variant():
 
 def test_redact_high_entropy_hex_token():
     assert redact_secrets(f"digest {HEX_TOKEN} end") == "digest <REDACTED> end"
+
+
+def test_redact_pure_hex_commit_sha_survives():
+    """40-char pure-lowercase-hex (commit SHA shape) is audit evidence —
+    the run log's fix/deploy hashes must survive redaction."""
+    assert redact_secrets(f"commit {SHA_SHAPE} landed") == (
+        f"commit {SHA_SHAPE} landed")
 
 
 def test_redact_high_entropy_base64_token():
