@@ -29,7 +29,7 @@ The headline result is tier3: the invisible bug — a `.catch(() => {})` swallow
 
 The demo-app `prod` branch tells the same story in three commits: `cf5a6e0` buggy server + gold.patch → `74a6a14` fix → `1f78f8e` revert. Rollback is a git operation — exact and verifiable.
 
-Honest footnotes: in the demo runs the approval was auto-granted to exercise the deploy loop, and the three tier runs sit at `awaiting_approval` by design — a human has not actually pushed them anywhere. The tool itself is green: **114/114 tests pass** at HEAD (`e3f8d78`, 2026-08-15), and `acceptance.sh` — the full end-to-end loop — was verified **2026-08-14 in 2m16s** (run `20260814-010641-7cbe`, `ACCEPTANCE PASS`) and re-passed **2026-08-15** after the container sandbox landed.
+Honest footnotes: in the demo runs the approval was auto-granted to exercise the deploy loop, and the three tier runs sit at `awaiting_approval` by design — a human has not actually pushed them anywhere. The tool itself is green: **116/116 tests pass** at HEAD (`ad364af`, 2026-08-15), and `acceptance.sh` — the full end-to-end loop — was verified **2026-08-14 in 2m16s** (run `20260814-010641-7cbe`, `ACCEPTANCE PASS`) and re-passed **2026-08-15** after the container sandbox landed.
 
 ## The tampering timeline
 
@@ -119,7 +119,7 @@ Phase 2 shipped the container sandbox this document's design section once listed
 
 ```bash
 cd ticket-to-fix
-uv run pytest -q -x                        # 114 tests at HEAD (2026-08-15)
+uv run pytest -q -x                        # 116 tests at HEAD (2026-08-15)
 uv run fde status 20260813-183354-0bf0     # tier3 (awaiting_approval)
 uv run fde status 20260813-183644-139e     # demo-app (rolled_back)
 cat runs/_chain2.log                       # full chain transcript
@@ -140,7 +140,7 @@ Every claim above is traceable to the evidence pack (`case-study-evidence.md`, e
 - **Tampering vectors and structural closure of skip-worktree** — evidence pack §5a; `fde/harness.py:133-138, 208-250`, `fde/agents.py:316-340`.
 - **Zero tampering events in run logs (grep results, event inventory)** — evidence pack §5b, Appendix; `runs/*/run.jsonl`, `runs/_chain2.log`.
 - **Harness state-C bug, fix commits `b5da0d7`/`9e195d0`, the `114.999` value, live failure run `171050-4e7b`** — evidence pack §6; `git show b5da0d7`, `runs/20260813-171050-4e7b/run.jsonl`.
-- **114/114 tests at HEAD, CLI surface** — `uv run pytest -q` at HEAD `e3f8d78` (2026-08-15); `STATUS.md:60-61`.
+- **116/116 tests at HEAD, CLI surface** — `uv run pytest -q` at HEAD `ad364af` (2026-08-15); `STATUS.md:60-61`.
 - **acceptance.sh PASS 2026-08-14, 2m16s, run `20260814-010641-7cbe`** — `runs/acceptance-verify.log` (verify start 01:06:41 → end 01:08:57, `ACCEPTANCE PASS`, `acceptance_exit=0`); earlier PASS in `runs/_acceptance.log` (run `20260813-201736-23f5`); re-passed 2026-08-15 after the sandbox landed.
 - **Process-tree corpses, `[WinError 2]` / PATH, codex version** — evidence pack §7; `STATUS.md:35-43`; run-state inventory in evidence pack §7b.
 - **`ROUND_TIMEOUT = 900`** — `fde/agents.py:28`; logged fix-round durations — `runs/acceptance-verify.log`, `runs/_acceptance.log`.
@@ -148,7 +148,7 @@ Every claim above is traceable to the evidence pack (`case-study-evidence.md`, e
 - **`FDE_AGENT_BACKEND` pluggability (codex default, mock/claude/deepseek implemented)** — `fde/agents.py:25`; README "Bring your own key" section.
 - **Sandbox = worktree + timeouts by default; Docker opt-in** — README "Security model" + "Docker sandbox (opt-in)" sections; `fde/harness.py:1-8, 52-66`.
 - **Public repo, pushed HEAD `48eb3ff`** — `STATUS.md:52-55`.
-- **Phase 2 (2026-08-15): image `183a77f`, hardening `9e02b8b`, tier6_escape `d57384a`, gitdir steering `0d6477d`, real-docker tests `9111b02`, pytest-in-image `715b21c`; 114 tests at HEAD** — `git show <sha>`; `uv run pytest -q`.
+- **Phase 2 (2026-08-15): image `183a77f`, hardening `9e02b8b`, tier6_escape `d57384a`, gitdir steering `0d6477d`, real-docker tests `9111b02`, pytest-in-image `715b21c`; 116 tests at HEAD** — `git show <sha>`; `uv run pytest -q`.
 - **In-container bench (identical tier1–5 + demo-app verdicts, tier6 `awaiting_approval`, exit 0, ~133s); host bench exit 0 with tier6 skipped; acceptance.sh PASS in host mode** — rerun via `FDE_SANDBOX=docker FDE_AGENT_BACKEND=mock uv run fde bench` / `FDE_AGENT_BACKEND=mock uv run fde bench` / `bash acceptance.sh`; the sandbox CI job (`.github/workflows/ci.yml`) runs the docker bench on every push.
 
 ---

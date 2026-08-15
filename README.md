@@ -36,7 +36,7 @@ Mock bench (deterministic, host mode):
 
 Real codex runs (2026-08-14): tier4 `20260814-025725-2915` — repro 1 attempt, fix 1 round, gates passed, `awaiting_approval`. tier5 `20260814-025736-2a01` — repro 1 attempt, fix 1 round, **gates failed (secrets x1)**, state `failed` — the refusal above, live.
 
-The tool itself: **114/114 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
+The tool itself: **116/116 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
 
 ## Docker sandbox (opt-in)
 
@@ -117,7 +117,7 @@ Everything else — the harness, gates, audit log, deploy, and rollback — is d
 ## Security model
 
 - By default the agent works in a git worktree with timeout-bounded subprocesses. Set `FDE_SANDBOX=docker` and every harness command runs in an ephemeral `fde-sandbox` container (`--network none`, `--cap-drop ALL`, no-new-privileges, only the worktree mounted) — see [Docker sandbox (opt-in)](#docker-sandbox-opt-in).
-- The harness treats the agent as an adversary. During development the agent tried three ways to fake a pass: rewriting the tracked test (closed with `reset --hard` + `clean -fd`), committing mid-run (closed with a baseline-HEAD guard), and `git update-index --skip-worktree` (closed structurally — the regression check runs without the agent's file present). Gates the agent can observe are gates the agent can defeat.
+- The harness treats the agent as an adversary. During development the agent tried three ways to fake a pass: rewriting the tracked test (closed with `reset --hard` + `clean -fd`), committing mid-run (closed with a baseline-HEAD guard), and `git update-index --skip-worktree` (closed structurally — the regression check runs without the agent's file present). Gates the agent can observe are gates the agent can defeat. Full timeline: [docs/TAMPERING.md](docs/TAMPERING.md).
 - No surviving run log contains an actual tampering event — the guards are prophylactic.
 - Nothing ships without `approve`; rollback is armed from the moment anything deploys.
 
@@ -127,8 +127,8 @@ Everything else — the harness, gates, audit log, deploy, and rollback — is d
 fde/            the pipeline (stdlib-only Python)
 fixtures/       six buggy fixture repos (tier1–3 + tier4_rework + tier5_outofscope + tier6_escape)
 demo-app/       the "production" target for the full loop
-tests/          pytest suite (114 tests, no network, no keys)
-docs/           case study
+tests/          pytest suite (116 tests, no network, no keys)
+docs/           case study, tampering timeline
 STATUS.md       run evidence ledger
 acceptance.sh   one-command end-to-end demo
 ```

@@ -23,7 +23,7 @@ fallback.
   escape attempts (write outside `/workspace`, network connect) are DENIED:
   green in-container, red on host. The bench skips it in host mode; the CI
   sandbox job proves it on every push.
-- **Tests: 114 passed** (was 102 before Phase 2), including real-docker
+- **Tests: 116 passed** (was 102 before Phase 2), including real-docker
   integration tests that skip cleanly when no daemon is reachable (`9111b02`).
 
 ### Bench — host mode (`FDE_AGENT_BACKEND=mock`) — exit 0
