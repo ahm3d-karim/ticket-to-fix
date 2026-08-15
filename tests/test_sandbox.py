@@ -429,6 +429,159 @@ def test_sandbox_plain_dir_single_mount(tmp_path, monkeypatch):
     assert argv.count("-v") == 1
 
 
+# --- Layer 1: FDE_SANDBOX=required (mandatory) + =host (explicit opt-in) ---
+
+def test_sandbox_active_when_required(monkeypatch):
+    """FDE_SANDBOX=required -> sandbox_active() is True (docker mandatory)."""
+    monkeypatch.setenv("FDE_SANDBOX", "required")
+    sb = _sandbox()
+    assert sb.sandbox_active() is True
+
+
+def test_sandbox_active_when_host(monkeypatch):
+    """FDE_SANDBOX=host -> sandbox_active() is False (explicit host opt-in)."""
+    monkeypatch.setenv("FDE_SANDBOX", "host")
+    sb = _sandbox()
+    assert sb.sandbox_active() is False
+
+
+def test_required_mode_daemon_down_fails_fast(tmp_path, monkeypatch):
+    """required: daemon unreachable -> RuntimeError NAMING FDE_SANDBOX=required
+    explicitly — never a silent fallback to host (the mode's whole point)."""
+    _make_fake_docker(tmp_path, monkeypatch, daemon_down=True)
+    monkeypatch.setenv("FDE_SANDBOX", "required")
+    sb = _sandbox()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sb.run_in_docker("echo hi", str(tmp_path), 30)
+
+    msg = str(excinfo.value)
+    assert "FDE_SANDBOX=required" in msg
+    assert "daemon" in msg
+
+
+def test_required_mode_missing_docker_binary_fails_fast(monkeypatch, tmp_path):
+    """required: docker CLI not on PATH -> RuntimeError naming
+    FDE_SANDBOX=required (fail fast, no fallback)."""
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    monkeypatch.setenv("FDE_SANDBOX", "required")
+    sb = _sandbox()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sb.run_in_docker("echo hi", str(tmp_path), 30)
+
+    assert "FDE_SANDBOX=required" in str(excinfo.value)
+
+
+def test_host_mode_warns_once_to_stderr(monkeypatch, capsys):
+    """FDE_SANDBOX=host -> loud stderr warning on FIRST use only (module-level
+    flag: once per process, never per call)."""
+    monkeypatch.setenv("FDE_SANDBOX", "host")
+    sb = _sandbox()
+
+    sb.sandbox_active()
+    sb.sandbox_active()  # second use must not re-warn
+
+    err = capsys.readouterr().err
+    assert err.count("FDE_SANDBOX=host") == 1
+    assert "not isolated" in err
+    assert "FDE_SANDBOX=required" in err
+
+
+def test_host_mode_warns_from_run_cmd(monkeypatch, tmp_path, capsys):
+    """run_cmd in host mode surfaces the warning through the routing path
+    (the harness never sees the mode — sandbox_active owns it)."""
+    monkeypatch.setenv("FDE_SANDBOX", "host")
+    _sandbox()
+    harness = _harness()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    res = harness.run_cmd("echo hi", str(cwd), 30)
+
+    assert res["rc"] == 0
+    assert "FDE_SANDBOX=host" in capsys.readouterr().err
+
+
+def test_required_mode_routes_run_cmd_like_docker(tmp_path, monkeypatch):
+    """required routes run_cmd through docker with an argv IDENTICAL to docker
+    mode (same predicate, same container flags) — only failure messages differ.
+    The container name is a fresh uuid per run, so it is normalized out."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_SANDBOX_IMAGE", "testimg")
+    _sandbox()
+    harness = _harness()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    r1 = harness.run_cmd("echo hi", str(cwd), 30)
+    assert r1["rc"] == 0 and FAKE_DOCKER_RAN in r1["out"]
+
+    monkeypatch.setenv("FDE_SANDBOX", "required")
+    r2 = harness.run_cmd("echo hi", str(cwd), 30)
+    assert r2["rc"] == 0 and FAKE_DOCKER_RAN in r2["out"]
+
+    lines = logs["args"].read_text(encoding="utf-8").splitlines()
+    # log layout: [run1, rm1-teardown, run2, rm2-teardown] — compare the two
+    # run invocations (indices 0 and 2), normalizing the fresh uuid name
+    docker_argv = re.sub(r"fde-sandbox-[0-9a-f]{8}",
+                         "fde-sandbox-<name>", lines[0])
+    required_argv = re.sub(r"fde-sandbox-[0-9a-f]{8}",
+                           "fde-sandbox-<name>", lines[2])
+    assert docker_argv == required_argv
+
+
+# --- Layer 2: container hardening flags ------------------------------------
+
+def test_hardening_flags_defaults_in_argv(tmp_path, monkeypatch):
+    """run_in_docker appends --memory/--cpus/--pids-limit/--read-only/--tmpfs
+    with defaults, ordered AFTER --security-opt and BEFORE the image."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    monkeypatch.setenv("FDE_SANDBOX_IMAGE", "testimg")
+    sb = _sandbox()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    sb.run_in_docker("echo hi", str(cwd), 30)
+
+    argv = _docker_argv(logs["args"])
+    for m in ("--memory 1g", "--cpus 2", "--pids-limit 256",
+              "--read-only", "--tmpfs /tmp"):
+        assert m in argv
+    markers = ["--security-opt no-new-privileges", "--memory 1g",
+               "--cpus 2", "--pids-limit 256", "--read-only",
+               "--tmpfs /tmp", "testimg", "bash"]
+    positions = [argv.index(m) for m in markers]
+    assert positions == sorted(positions)
+
+
+def test_hardening_flags_env_overrides(tmp_path, monkeypatch):
+    """FDE_SANDBOX_MEMORY / FDE_SANDBOX_CPUS / FDE_SANDBOX_PIDS override the
+    defaults in the argv; --read-only and --tmpfs /tmp stay fixed."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_SANDBOX", "docker")
+    monkeypatch.setenv("FDE_SANDBOX_IMAGE", "testimg")
+    monkeypatch.setenv("FDE_SANDBOX_MEMORY", "512m")
+    monkeypatch.setenv("FDE_SANDBOX_CPUS", "1.5")
+    monkeypatch.setenv("FDE_SANDBOX_PIDS", "128")
+    sb = _sandbox()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    sb.run_in_docker("echo hi", str(cwd), 30)
+
+    argv = _docker_argv(logs["args"])
+    assert "--memory 512m" in argv
+    assert "--cpus 1.5" in argv
+    assert "--pids-limit 128" in argv
+    assert "--read-only" in argv
+    assert "--tmpfs /tmp" in argv
+
+
 # --- Real-docker integration tests (skip when no daemon) -----------------
 
 def _docker_available() -> bool:

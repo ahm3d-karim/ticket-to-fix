@@ -5,19 +5,27 @@ test, git apply/restore/diff — the whole pipeline) through
 :func:`run_in_docker`: an ephemeral ``fde-sandbox`` container running
 ``bash -c <cmd>`` with the worktree mounted at ``/workspace``, networking
 disabled (``--network none``), all capabilities dropped (``--cap-drop
-ALL``) and new privileges blocked (``--security-opt no-new-privileges``),
-so the repo's "sandbox" claim is literal instead of a worktree-with-
-timeouts approximation.
+ALL``), new privileges blocked (``--security-opt no-new-privileges``),
+resource limits applied (``--memory``/``--cpus``/``--pids-limit``,
+overridable via ``FDE_SANDBOX_MEMORY``/``FDE_SANDBOX_CPUS``/``FDE_SANDBOX_PIDS``)
+and a read-only rootfs (``--read-only`` with a writable ``--tmpfs /tmp`` for
+node/git/python) — so the repo's "sandbox" claim is literal instead of a
+worktree-with-timeouts approximation.
 
 Unset or empty ``FDE_SANDBOX`` = host mode, current behavior untouched
-(the one-command demo never depends on Docker). Unknown values raise
-``ValueError`` at call time — the same reject-unknowns dispatch pattern as
-the agent backend (fde/agents.py ``_dispatch_backend``), never a silent
-fallthrough. The docker CLI itself is resolved per call via
-``shutil.which``; a missing binary raises ``RuntimeError`` instead of a
-confusing ``FileNotFoundError`` from Popen. The daemon is preflighted per
-call (``_daemon_ready``); when it is unreachable, ``run_in_docker`` fails
-fast with ``RuntimeError`` — never a silent fallback.
+(the one-command demo never depends on Docker). ``FDE_SANDBOX=host`` is the
+explicit opt-in to that same host mode — it behaves identically but prints
+a loud once-per-process warning to stderr. ``FDE_SANDBOX=required`` makes
+docker MANDATORY: same routing as ``docker``, but the daemon/binary
+fail-fast errors name ``FDE_SANDBOX=required`` explicitly — there is never
+a host fallback. Unknown values raise ``ValueError`` at call time — the
+same reject-unknowns dispatch pattern as the agent backend (fde/agents.py
+``_dispatch_backend``), never a silent fallthrough. The docker CLI itself
+is resolved per call via ``shutil.which``; a missing binary raises
+``RuntimeError`` instead of a confusing ``FileNotFoundError`` from Popen.
+The daemon is preflighted per call (``_daemon_ready``); when it is
+unreachable, ``run_in_docker`` fails fast with ``RuntimeError`` — never a
+silent fallback.
 
 The container name is derived from a fresh ``uuid4()`` so concurrent runs
 never collide; teardown (``docker kill`` on timeout, ``docker rm -f``
@@ -28,26 +36,52 @@ path as well. Return shape is identical to ``harness.run_cmd``:
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
-VALID_SANDBOXES = ("", "docker")
+VALID_SANDBOXES = ("", "docker", "required", "host")
+
+_HOST_MODE_WARN = (
+    "FDE_SANDBOX=host: running harness commands on the HOST — not isolated. "
+    "Set FDE_SANDBOX=required for the secure posture.")
+_HOST_MODE_WARNED = False
 
 
-def sandbox_active() -> bool:
-    """True when ``FDE_SANDBOX=docker`` (read at call time).
-
-    Reads the env var on every call (not at import) so tests can
-    monkeypatch ``os.environ`` freely. Empty/unset -> False (host mode).
-    Any other value raises ValueError naming the valid values.
-    """
-    value = os.environ.get("FDE_SANDBOX", "")
+def _validate_sandbox_value(value: str) -> str:
+    """Reject unknown FDE_SANDBOX values (shared by every entry point)."""
     if value not in VALID_SANDBOXES:
         raise ValueError(
             f"unknown FDE_SANDBOX {value!r} — expected one of "
             f"{', '.join(repr(v) for v in VALID_SANDBOXES)} "
             "(empty string is the default)")
-    return value == "docker"
+    return value
+
+
+def _warn_host_mode_once() -> None:
+    """Print the FDE_SANDBOX=host warning to stderr exactly once per process."""
+    global _HOST_MODE_WARNED
+    if _HOST_MODE_WARNED:
+        return
+    _HOST_MODE_WARNED = True
+    print(_HOST_MODE_WARN, file=sys.stderr)
+
+
+def sandbox_active() -> bool:
+    """True when ``FDE_SANDBOX`` is ``docker`` or ``required`` (read at call
+    time).
+
+    Reads the env var on every call (not at import) so tests can
+    monkeypatch ``os.environ`` freely. Empty/unset -> False (host mode).
+    ``host`` -> False too, but with a loud once-per-process stderr warning
+    (explicit opt-in, never silent). Any other value raises ValueError
+    naming the valid values.
+    """
+    value = _validate_sandbox_value(os.environ.get("FDE_SANDBOX", ""))
+    if value == "host":
+        _warn_host_mode_once()
+        return False
+    return value in ("docker", "required")
 
 
 _MISSING_DOCKER_MSG = (
@@ -58,12 +92,39 @@ _DAEMON_DOWN_MSG = (
     "FDE_SANDBOX=docker but the docker daemon is not reachable — "
     "start Docker Desktop or unset FDE_SANDBOX")
 
+_MISSING_DOCKER_REQUIRED_MSG = (
+    "FDE_SANDBOX=required but the docker CLI was not found on PATH — "
+    "FDE_SANDBOX=required demands the docker daemon and there is no host "
+    "fallback; start Docker Desktop or unset FDE_SANDBOX")
+
+_DAEMON_DOWN_REQUIRED_MSG = (
+    "FDE_SANDBOX=required but the docker daemon is not reachable — "
+    "FDE_SANDBOX=required demands the docker daemon and there is no host "
+    "fallback; start Docker Desktop or unset FDE_SANDBOX")
+
+
+def _sandbox_mode() -> str:
+    """The raw FDE_SANDBOX value (message selection inside run_in_docker)."""
+    return os.environ.get("FDE_SANDBOX", "")
+
+
+def _missing_docker_msg() -> str:
+    if _sandbox_mode() == "required":
+        return _MISSING_DOCKER_REQUIRED_MSG
+    return _MISSING_DOCKER_MSG
+
+
+def _daemon_down_msg() -> str:
+    if _sandbox_mode() == "required":
+        return _DAEMON_DOWN_REQUIRED_MSG
+    return _DAEMON_DOWN_MSG
+
 
 def _docker_binary() -> str:
     """Resolve the docker CLI; raise a clear error when it is missing."""
     docker = shutil.which("docker")
     if docker is None:
-        raise RuntimeError(_MISSING_DOCKER_MSG)
+        raise RuntimeError(_missing_docker_msg())
     return docker
 
 
@@ -188,9 +249,9 @@ def run_in_docker(cmd: str, cwd: str, timeout: int = 60) -> dict:
     """
     docker = _docker_binary()
     if docker is None:  # mock/monkeypatched _docker_binary may return None
-        raise RuntimeError(_MISSING_DOCKER_MSG)
+        raise RuntimeError(_missing_docker_msg())
     if not _daemon_ready(docker):
-        raise RuntimeError(_DAEMON_DOWN_MSG)
+        raise RuntimeError(_daemon_down_msg())
     name = "fde-sandbox-" + uuid.uuid4().hex[:8]
     volumes = [f"{os.path.abspath(cwd)}:/workspace"]
     extra_mounts, git_env = _sandbox_git_env(cwd)
@@ -198,6 +259,16 @@ def run_in_docker(cmd: str, cwd: str, timeout: int = 60) -> dict:
     # docker run does NOT inherit the CLI process env — git steering must be
     # explicit -e flags for the container
     env_args = [a for k, v in git_env.items() for a in ("-e", f"{k}={v}")]
+    # container hardening: resource limits (env-overridable) + read-only
+    # rootfs with a writable tmpfs /tmp (node/git/python need it; the
+    # worktree and gitdir mounts are already writable volumes)
+    hardening = [
+        "--memory", os.environ.get("FDE_SANDBOX_MEMORY") or "1g",
+        "--cpus", os.environ.get("FDE_SANDBOX_CPUS") or "2",
+        "--pids-limit", os.environ.get("FDE_SANDBOX_PIDS") or "256",
+        "--read-only",
+        "--tmpfs", "/tmp",
+    ]
     argv = [
         docker, "run", "--rm", "--name", name,
         *volume_args,
@@ -207,6 +278,7 @@ def run_in_docker(cmd: str, cwd: str, timeout: int = 60) -> dict:
         "--network", "none",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        *hardening,
         os.environ.get("FDE_SANDBOX_IMAGE", "fde-sandbox:latest"),
         "bash", "-c", cmd,
     ]
