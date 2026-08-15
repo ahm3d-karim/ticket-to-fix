@@ -316,3 +316,48 @@ def test_bootstrap_env_does_not_override_existing_env(tmp_path, monkeypatch):
     env = {"DEEPSEEK_API_KEY": "sk-exported"}
     agents._bootstrap_env(env)
     assert env["DEEPSEEK_API_KEY"] == "sk-exported"
+
+
+def test_deepseek_prompt_survives_cmd_shim(tmp_path, monkeypatch):
+    """Windows regression (observed 2026-08-15 on real dsh): the npm
+    `dsh.CMD` shim re-parses argv through cmd.exe, which mangles multi-line
+    prompts containing quotes — real repro prompts carry symptom strings
+    like `"row 7 malformed"` — so the agent receives garbage and can never
+    create the repro file (silent loop failure, 0 attempts). The backend
+    must bypass the .cmd shim and invoke node + the JS entry directly.
+
+    The fake reproduces npm's global-install layout: `dsh.cmd` shim →
+    `node node_modules/@deepseek-ai/dsh/lib/bin.js`, which logs its argv
+    verbatim. Assert the full prompt (quotes + newlines) arrives intact.
+    On POSIX the extensionless sh script runs node directly — same
+    guarantee, fallback path."""
+    bin_dir = tmp_path / "bin"
+    entry = bin_dir / "node_modules" / "@deepseek-ai" / "dsh" / "lib" / "bin.js"
+    entry.parent.mkdir(parents=True)
+    argv_log = tmp_path / "argv.json"
+    entry.write_text(
+        "const fs=require('fs');"
+        f"fs.writeFileSync({str(argv_log)!r}, JSON.stringify(process.argv.slice(2)));"
+        "console.log('{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fake\","
+        "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}');",
+        encoding="utf-8")
+    (bin_dir / "dsh.cmd").write_text(
+        '@ECHO off\r\nSET dp0=%~dp0\r\n'
+        'IF EXIST "%dp0%\\node.exe" (SET "_prog=%dp0%\\node.exe") ELSE (SET "_prog=node")\r\n'
+        'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & '
+        '"%_prog%" "%dp0%\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js" %*\r\n',
+        encoding="utf-8")
+    sh = bin_dir / "dsh"
+    sh.write_text(
+        '#!/bin/sh\n'
+        'exec node "$(dirname "$0")/node_modules/@deepseek-ai/dsh/lib/bin.js" "$@"\n',
+        encoding="utf-8")
+    sh.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep
+                       + os.environ.get("PATH", ""))
+    monkeypatch.setattr(agents, "BACKEND", "deepseek")
+    prompt = 'Symptom to reproduce: "row 7 malformed"\nwrite the failing test'
+    res = agents.codex_exec(prompt, str(tmp_path))
+    assert res["rc"] == 0
+    logged = json.loads(argv_log.read_text(encoding="utf-8"))
+    assert logged == ["--profile", "headless", prompt]

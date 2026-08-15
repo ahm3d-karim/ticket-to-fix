@@ -19,6 +19,7 @@ Contracts:
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -355,8 +356,10 @@ def _run_cli(argv: list[str], cwd: str, timeout: int, missing_msg: str,
 
 def _claude_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     """Run the Claude Code CLI headless in the run's worktree (cwd)."""
-    argv = [_claude_binary(), "-p", "--output-format", "json",
-            "--dangerously-skip-permissions", prompt]
+    argv = _headless_cli_argv(
+        _claude_binary(),
+        ["-p", "--output-format", "json", "--dangerously-skip-permissions"],
+        prompt)
     return _run_cli(
         argv, cwd, timeout,
         "FDE_AGENT_BACKEND=claude but the `claude` CLI was not found on "
@@ -370,6 +373,45 @@ def _deepseek_binary() -> str:
     return shutil.which("dsh") or "dsh"
 
 
+def _npm_shim_to_node(binary: str) -> tuple[str, str] | None:
+    """Resolve an npm `.cmd` shim to (node.exe, JS entry).
+
+    npm's Windows shims end with `"%_prog%"  "%dp0%\\node_modules\\<pkg>\\...
+    \\.js" %*`. Reading the shim text is the only portable way to find the
+    real entry. Returns None for anything that is not a resolvable npm shim
+    (native exes, POSIX scripts, non-npm fakes) — the caller then invokes
+    the binary as-is.
+    """
+    if not binary.lower().endswith((".cmd", ".bat")):
+        return None
+    try:
+        text = Path(binary).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.search(r'"%dp0%\\([^"]*?\.js)"', text)
+    if not m:
+        return None
+    script = str(Path(binary).parent / m.group(1))
+    node = shutil.which("node") or str(Path(binary).parent / "node.exe")
+    if node and Path(script).is_file():
+        return node, script
+    return None
+
+
+def _headless_cli_argv(binary: str, args: list[str], prompt: str) -> list[str]:
+    """Build the argv for a headless npm-installed CLI, bypassing the .cmd
+    shim on Windows: cmd.exe re-parses the command line and mangles
+    multi-line prompts containing quotes (observed with real dsh — the
+    agent received garbage and silently never created the repro file).
+    An npm `.cmd` shim is resolved to (node.exe, JS entry); anything else
+    is invoked as-is.
+    """
+    shim = _npm_shim_to_node(binary)
+    if shim:
+        return [shim[0], shim[1], *args, prompt]
+    return [binary, *args, prompt]
+
+
 def _deepseek_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     """Run DeepSeek Harness headless in the run's worktree (cwd).
 
@@ -378,7 +420,8 @@ def _deepseek_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     directory is the default workspace root, so cwd=worktree is the analogue
     of codex's `-C cwd`. Developer preview upstream: pin the npm version.
     """
-    argv = [_deepseek_binary(), "--profile", "headless", prompt]
+    argv = _headless_cli_argv(
+        _deepseek_binary(), ["--profile", "headless"], prompt)
     return _run_cli(
         argv, cwd, timeout,
         "FDE_AGENT_BACKEND=deepseek but the `dsh` CLI was not found on "
