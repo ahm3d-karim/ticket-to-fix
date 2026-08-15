@@ -4,6 +4,40 @@
 > Any agent (CLI/PC, Discord, codex) opening this repo: read this first.
 > Source of truth: `runs/<run_id>/run.jsonl` + `runs/_chain2.log`.
 
+## Phase 3: Production security — SHIPPED (2026-08-15)
+
+Five hardening layers, each verified by fresh tests; suite went 118 → **178**
+(commits `f2a13e9`, `f5cd2be`, `72e5a82`, `8090a86`, `85930fa`). Threat
+model + honest limits: `docs/PRODUCTION_SECURITY.md`.
+
+- **Layer 1+2 (`f2a13e9`) — mandatory sandbox + hardening.** `FDE_SANDBOX`
+  now accepts `required` (docker mandatory — daemon down fails fast naming
+  the mode, no host fallback) and `host` (explicit, one-time stderr
+  warning). Containers get `--memory` (1g), `--cpus` (2),
+  `--pids-limit` (256), `--read-only` + `--tmpfs /tmp`; env-overridable via
+  `FDE_SANDBOX_MEMORY/CPUS/PIDS`. Real-docker tests run against the hardened
+  container.
+- **Layer 3 (`72e5a82`) — tamper-evident audit + named approval.** Every
+  run.jsonl line carries the sha256 of the previous line (chain survives
+  cross-process appends); `fde audit <run>` validates (exit 0/1);
+  `fde approve [--approver NAME]` records who (flag → `FDE_APPROVER` → git
+  identity).
+- **Layer 4 (`f5cd2be` + `8090a86`) — secret scrubbing.** `redact_secrets`
+  (API keys, AWS/GitHub tokens, PEM blocks, high-entropy runs),
+  `scrub_ticket`, `redact_event_data`. Wired at the run-log write path
+  (redaction BEFORE hashing — chain stays valid; `secrets_redacted` marker)
+  and into both prompt builders (secrets never reach the model API).
+  Pure-hex commit SHAs are exempt — the audit trail's hashes are evidence,
+  verified against real run logs (0 false positives).
+- **Layer 5 (`85930fa`) — agent-in-container.** `FDE_AGENT_CONTAINER=1`
+  runs the agent CLI itself in the `fde-agent` container
+  (`Dockerfile.agent`: node 22-slim + pinned dsh/codex, keys at runtime
+  only): worktree mount, explicit env allowlist (API keys + proxy vars),
+  same resource policy, egress via `FDE_AGENT_NETWORK` (domain
+  allowlisting = operator's job, `FDE_AGENT_PROXY` supported), watchdog
+  `docker kill`s the container on timeout. Bare binary names in-container —
+  no .cmd shim bug class.
+
 ## Phase 2: Docker sandbox — SHIPPED (2026-08-15)
 
 The sandbox is now literal. `FDE_SANDBOX=docker` routes every harness command

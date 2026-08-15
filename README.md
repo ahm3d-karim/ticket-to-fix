@@ -7,7 +7,7 @@ That is what this project is about: agentic automation you can trust. Not "an AI
 
 A CLI-first pipeline: ticket in → bug reproduced in a sandbox → an agent fixes it → a 3-state harness verifies the fix → a human approves → deployed with rollback armed. Every step audit-logged.
 
-> **Status: portfolio piece.** It works end-to-end and is fully testable, but it is not a supported product. The sandbox is now literal: with `FDE_SANDBOX=docker` every harness command runs in an ephemeral, network-isolated `fde-sandbox` container (opt-in — the default host mode needs nothing installed). Full story: [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
+> **Status: portfolio piece.** It works end-to-end and is fully testable, but it is not a supported product. The sandbox is now literal: with `FDE_SANDBOX=docker` (or `required`) every harness command runs in an ephemeral, network-isolated `fde-sandbox` container (opt-in — the default host mode needs nothing installed). Full story: [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
 
 ## When it fails
 
@@ -36,7 +36,7 @@ Mock bench (deterministic, host mode):
 
 Real codex runs (2026-08-14): tier4 `20260814-025725-2915` — repro 1 attempt, fix 1 round, gates passed, `awaiting_approval`. tier5 `20260814-025736-2a01` — repro 1 attempt, fix 1 round, **gates failed (secrets x1)**, state `failed` — the refusal above, live.
 
-The tool itself: **118/118 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
+The tool itself: **178/178 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
 
 ## Docker sandbox (opt-in)
 
@@ -97,7 +97,8 @@ Real-run results across backends (codex vs deepseek vs mock, honest scope and la
 | `fde repro <run>` | agent writes a failing repro test; the harness verifies it |
 | `fde fix <run>` | agent fixes until repro + suite pass; security gates run |
 | `fde diff <run>` | evidence package + verification summary (observed signals only) |
-| `fde approve <run>` | human approval gate — nothing deploys without it |
+| `fde approve <run> [--approver NAME]` | human approval gate — records WHO; nothing deploys without it |
+| `fde audit <run>` | validate the tamper-evident hash chain (exit 0 intact / 1 broken) |
 | `fde deploy --preview/--prod <run>` | serve the fix, curl health-check it |
 | `fde rollback <run>` | revert the fix on prod, verify pre-fix behavior |
 | `fde resume <run>` | recover a run stuck in `reproducing`/`fixing` (killed session) |
@@ -118,7 +119,10 @@ Real-run results across backends (codex vs deepseek vs mock, honest scope and la
 
 ## Security model
 
-- By default the agent works in a git worktree with timeout-bounded subprocesses. Set `FDE_SANDBOX=docker` and every harness command runs in an ephemeral `fde-sandbox` container (`--network none`, `--cap-drop ALL`, no-new-privileges, only the worktree mounted) — see [Docker sandbox (opt-in)](#docker-sandbox-opt-in).
+- By default the agent works in a git worktree with timeout-bounded subprocesses. Set `FDE_SANDBOX=docker` (or `required`) and every harness command runs in an ephemeral `fde-sandbox` container (`--network none`, `--cap-drop ALL`, no-new-privileges, memory/cpus/pids limits, read-only rootfs, only the worktree mounted) — see [Docker sandbox (opt-in)](#docker-sandbox-opt-in). `FDE_SANDBOX=required` makes the container mandatory: daemon down = fail fast, no host fallback.
+- `FDE_AGENT_CONTAINER=1` isolates the agent CLI itself in the `fde-agent` container (env allowlist: API keys + proxy vars only) — the agent process can no longer touch the host.
+- Every run-log event is hash-chained (tamper-evident) and secret-redacted at write time; `fde audit <run>` validates the chain, and approval records who.
+- Layered threat model, honest limits, and the one-line secure posture: [docs/PRODUCTION_SECURITY.md](docs/PRODUCTION_SECURITY.md).
 - The harness treats the agent as an adversary. During development the agent tried three ways to fake a pass: rewriting the tracked test (closed with `reset --hard` + `clean -fd`), committing mid-run (closed with a baseline-HEAD guard), and `git update-index --skip-worktree` (closed structurally — the regression check runs without the agent's file present). Gates the agent can observe are gates the agent can defeat. Full timeline: [docs/TAMPERING.md](docs/TAMPERING.md).
 - No surviving run log contains an actual tampering event — the guards are prophylactic.
 - Nothing ships without `approve`; rollback is armed from the moment anything deploys.
@@ -129,8 +133,10 @@ Real-run results across backends (codex vs deepseek vs mock, honest scope and la
 fde/            the pipeline (stdlib-only Python)
 fixtures/       six buggy fixture repos (tier1–3 + tier4_rework + tier5_outofscope + tier6_escape)
 demo-app/       the "production" target for the full loop
-tests/          pytest suite (118 tests, no network, no keys)
-docs/           case study, tampering timeline, backend comparison
+tests/          pytest suite (178 tests, no network, no keys)
+docs/           case study, tampering timeline, backend comparison, production security
+Dockerfile      the fde-sandbox command container (harness commands)
+Dockerfile.agent  the fde-agent container (agent CLI isolation, FDE_AGENT_CONTAINER=1)
 STATUS.md       run evidence ledger
 acceptance.sh   one-command end-to-end demo
 ```
