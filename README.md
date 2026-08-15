@@ -36,7 +36,7 @@ Mock bench (deterministic, host mode):
 
 Real codex runs (2026-08-14): tier4 `20260814-025725-2915` — repro 1 attempt, fix 1 round, gates passed, `awaiting_approval`. tier5 `20260814-025736-2a01` — repro 1 attempt, fix 1 round, **gates failed (secrets x1)**, state `failed` — the refusal above, live.
 
-The tool itself: **116/116 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
+The tool itself: **118/118 tests pass**. `acceptance.sh` — the one-command end-to-end demo — passes in ~2 minutes. And `fde resume` was validated on a real stuck run: a corpse left in `fixing` by a killed session was recovered to `awaiting_approval` with a `resumed` event in its audit log.
 
 ## Docker sandbox (opt-in)
 
@@ -86,6 +86,8 @@ The agent step shells out to an external agent CLI. Pick the backend with `FDE_A
 
 Everything else — the harness, gates, audit log, deploy, and rollback — is deterministic and needs no key or network.
 
+Real-run results across backends (codex vs deepseek vs mock, honest scope and latency notes): [docs/BACKEND_COMPARISON.md](docs/BACKEND_COMPARISON.md).
+
 ## CLI
 
 | command | what it does |
@@ -127,8 +129,8 @@ Everything else — the harness, gates, audit log, deploy, and rollback — is d
 fde/            the pipeline (stdlib-only Python)
 fixtures/       six buggy fixture repos (tier1–3 + tier4_rework + tier5_outofscope + tier6_escape)
 demo-app/       the "production" target for the full loop
-tests/          pytest suite (116 tests, no network, no keys)
-docs/           case study, tampering timeline
+tests/          pytest suite (118 tests, no network, no keys)
+docs/           case study, tampering timeline, backend comparison
 STATUS.md       run evidence ledger
 acceptance.sh   one-command end-to-end demo
 ```
