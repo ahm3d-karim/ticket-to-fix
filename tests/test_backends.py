@@ -288,3 +288,31 @@ def test_default_backend_is_codex_when_env_unset():
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "codex"
+
+
+def test_bootstrap_env_pulls_deepseek_key_from_env_file(tmp_path, monkeypatch):
+    """FDE_AGENT_ENV_FILE bootstrap must cover DEEPSEEK_API_KEY (the env var
+    the dsh backend's deepseek-official provider reads), not just codex's
+    OPENCODE_GO_* keys."""
+    env_file = tmp_path / "env"
+    env_file.write_text(
+        "DEEPSEEK_API_KEY=sk-ds-test\nOPENCODE_GO_API_KEY=sk-cx-test\n",
+        encoding="utf-8")
+    monkeypatch.setenv("FDE_AGENT_ENV_FILE", str(env_file))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    env: dict = {}
+    agents._bootstrap_env(env)
+    assert env["DEEPSEEK_API_KEY"] == "sk-ds-test"
+    assert env["OPENCODE_GO_API_KEY"] == "sk-cx-test"
+
+
+def test_bootstrap_env_does_not_override_existing_env(tmp_path, monkeypatch):
+    """setdefault semantics: a key already in the environment wins over the
+    env file (machine-level exports take precedence)."""
+    env_file = tmp_path / "env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-file\n", encoding="utf-8")
+    monkeypatch.setenv("FDE_AGENT_ENV_FILE", str(env_file))
+    env = {"DEEPSEEK_API_KEY": "sk-exported"}
+    agents._bootstrap_env(env)
+    assert env["DEEPSEEK_API_KEY"] == "sk-exported"

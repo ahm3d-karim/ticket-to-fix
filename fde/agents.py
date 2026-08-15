@@ -126,7 +126,8 @@ def _bootstrap_env(env: dict) -> None:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                if k in ("OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL"):
+                if k in ("OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL",
+                         "DEEPSEEK_API_KEY"):
                     env.setdefault(k, v)
     except OSError:
         pass
