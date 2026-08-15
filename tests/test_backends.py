@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import fde.agents as agents
+import fde.runlog
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -361,3 +362,50 @@ def test_deepseek_prompt_survives_cmd_shim(tmp_path, monkeypatch):
     assert res["rc"] == 0
     logged = json.loads(argv_log.read_text(encoding="utf-8"))
     assert logged == ["--profile", "headless", prompt]
+
+
+def test_repro_loop_adopts_worktree_file_from_confined_agent(tmp_path, monkeypatch):
+    """Regression (2026-08-15, real dsh): workspace-confined agents
+    (dsh/claude with workspace-write permission) cannot write one level
+    above their cwd, so the repro test lands INSIDE the worktree while the
+    loop checks the run dir — the file was never seen and every attempt was
+    rejected ("harness rejected repro test after 3 attempts", zero
+    test_result events, while the file sat in the worktree). The loop now
+    adopts a same-named file found in the worktree; the run-level copy
+    stays the source of truth (it survives worktree resets between fix
+    rounds)."""
+    runs_dir = tmp_path / "runs"
+    monkeypatch.setattr(fde.runlog, "RUNS_DIR", runs_dir)
+    run_id = "20260815-test-0001"
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+    ticket = {"system": "tier3_ingest", "symptom": "row 7 malformed",
+              "expected": "errors list populated",
+              "actual": "errors list empty"}
+    manifest = {"app_type": "js", "test_cmd": "node --test",
+                "install_cmd": None}
+
+    def confined_agent(prompt, cwd):
+        # the dsh harness writes inside its workspace root (cwd) — never
+        # one level up in the run dir
+        (Path(cwd) / "repro.test.js").write_text(
+            "// confined agent wrote here", encoding="utf-8")
+        return {"rc": 0, "out": "ok", "timed_out": False,
+                "summary": "wrote the test", "duration_ms": 1}
+
+    monkeypatch.setattr(agents, "codex_exec", confined_agent)
+    monkeypatch.setattr(
+        agents, "verify_repro",
+        lambda *a, **k: {"pass": True,
+                         "checks": {"a": {"ok": True, "rc": 0},
+                                    "b": {"ok": True, "rc": 0},
+                                    "c": {"ok": True, "rc": 0}},
+                         "duration_ms": 1})
+    result = agents.repro_loop(run_id, str(tmp_path / "repo"), str(wt),
+                               manifest, ticket)
+    assert result["ok"] is True
+    assert result["attempts"] == 1
+    adopted = runs_dir / run_id / "repro.test.js"
+    assert adopted.read_text(encoding="utf-8") == "// confined agent wrote here"
+    assert (wt / "repro.test.js").read_text(encoding="utf-8") \
+        == "// confined agent wrote here"

@@ -582,8 +582,8 @@ def _repro_prompt(ticket: dict, manifest: dict, repro_path: Path,
         f"Test command: {manifest['test_cmd']}",
         f"Install command (already run): {manifest['install_cmd'] or 'none'}",
         "",
-        "Task: write ONE failing test file at exactly:",
-        f"  {_prompt_path(repro_path)}",
+        "Task: write ONE failing test file in the working directory (repo",
+        f"root), named exactly: {repro_path.name}",
         "The test must:",
         "1. FAIL on the current (buggy) code,",
         f"2. contain the symptom string \"{ticket['symptom']}\" in its failure",
@@ -653,9 +653,19 @@ def repro_loop(run_id: str, repo: str, worktree: str, manifest: dict,
                    {"stage": "repro", "attempt": attempt, "reason": "timeout"})
             return {"ok": False, "reason": "agent timeout"}
         if not repro_path.exists():
-            feedback = (f"you did not create the file "
-                        f"{repro_path.name} — create it with the failing test")
-            continue
+            wt_file = Path(worktree) / repro_path.name
+            if wt_file.exists():
+                # Workspace-confined agents (dsh/claude with
+                # workspace-write) cannot write one level above their cwd
+                # (the run dir) — they land the test in the worktree.
+                # Adopt it: the run-level copy is the source of truth that
+                # survives worktree resets between fix rounds.
+                shutil.copy2(wt_file, repro_path)
+            else:
+                feedback = (f"you did not create the file "
+                            f"{repro_path.name} — create it in the working "
+                            f"directory with the failing test")
+                continue
         verdict = verify_repro(repo, worktree, manifest, ticket, str(repro_path))
         append(run_id, "test_result", {
             "stage": "repro", "attempt": attempt, "verdict": verdict["pass"],
