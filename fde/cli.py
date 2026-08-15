@@ -6,7 +6,8 @@ Commands:
   repro <run_id>            agent writes repro test; 3-state harness verifies
   fix <run_id>              agent fixes until repro test + suite pass; gates run
   diff <run_id>             print the evidence package
-  approve <run_id>          human approval gate
+  approve <run_id>          human approval gate (records the approver)
+  audit <run_id>            verify the tamper-evident audit log (hash chain)
   deploy --preview <run_id> serve the fix on the preview port
   deploy --prod <run_id>    fast-forward prod, restart server, verify
   rollback <run_id>         revert the fix on prod, restart, verify
@@ -25,7 +26,7 @@ from .deploy import (DeployError, discard_preview, preview_deploy, prod_deploy,
                      rollback)
 from .harness import run_cmd
 from .runlog import (RUNS_DIR, append, events, new_run_id, run_dir, set_state,
-                     snapshot, state)
+                     snapshot, state, verify_chain)
 from .ticket import TicketError, parse_ticket
 from .worktree import create_worktree, discard_worktree
 
@@ -263,12 +264,47 @@ def cmd_diff(args) -> int:
     return 0
 
 
+def cmd_audit(args) -> int:
+    """Validate the run's tamper-evident audit log (hash chain)."""
+    run_id = args.run_id
+    problems = verify_chain(run_id)
+    if problems:
+        print(f"audit: CHAIN BROKEN — {'; '.join(problems)}")
+        return 1
+    print(f"audit: chain intact ({len(events(run_id))} events)")
+    return 0
+
+
+def _git_approver() -> str | None:
+    """The repo's git config user.name, or None when git can't report one."""
+    repo_root = Path(__file__).resolve().parent.parent
+    try:
+        r = subprocess.run(["git", "-C", str(repo_root), "config", "user.name"],
+                           capture_output=True, text=True, timeout=10)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    name = r.stdout.strip()
+    return name or None
+
+
+def _resolve_approver(flag: str | None) -> str:
+    """Approver identity: --approver flag, else FDE_APPROVER env, else git
+    config user.name, else 'unknown'."""
+    if flag:
+        return flag
+    env = os.environ.get("FDE_APPROVER")
+    if env:
+        return env
+    return _git_approver() or "unknown"
+
+
 def cmd_approve(args) -> int:
     run_id = args.run_id
     _need_state(run_id, "awaiting_approval")
     set_state(run_id, "approved")
-    append(run_id, "approved", {"by": "human"})
-    print(f"run {run_id} approved — ready for 'fde deploy --prod'")
+    approver = _resolve_approver(args.approver)
+    append(run_id, "approved", {"by": "human", "approver": approver})
+    print(f"run {run_id} approved by {approver} — ready for 'fde deploy --prod'")
     return 0
 
 
@@ -438,11 +474,20 @@ def build_parser() -> argparse.ArgumentParser:
         ("repro", "agent writes repro test; 3-state harness verifies"),
         ("fix", "agent fixes until repro test + suite pass; gates run"),
         ("diff", "print the evidence package"),
-        ("approve", "human approval gate"),
         ("rollback", "revert the fix on prod and restart"),
     ):
         p = sub.add_parser(name, help=help_)
         p.add_argument("run_id")
+
+    p_approve = sub.add_parser("approve", help="human approval gate")
+    p_approve.add_argument("run_id")
+    p_approve.add_argument("--approver", default=None,
+                           help="approver identity (default: FDE_APPROVER "
+                                "env, git config user.name, or 'unknown')")
+
+    p_audit = sub.add_parser(
+        "audit", help="verify the run's tamper-evident audit log (hash chain)")
+    p_audit.add_argument("run_id")
 
     p_deploy = sub.add_parser("deploy", help="preview or production deploy")
     p_deploy.add_argument("--preview", dest="mode", action="store_const", const="preview",
@@ -470,8 +515,8 @@ def main(argv: list[str] | None = None) -> int:
     handler = {
         "submit": cmd_submit, "status": cmd_status, "repro": cmd_repro,
         "fix": cmd_fix, "diff": cmd_diff, "approve": cmd_approve,
-        "deploy": cmd_deploy, "rollback": cmd_rollback, "bench": cmd_bench,
-        "resume": cmd_resume,
+        "audit": cmd_audit, "deploy": cmd_deploy, "rollback": cmd_rollback,
+        "bench": cmd_bench, "resume": cmd_resume,
     }[args.command]
     return handler(args)
 
