@@ -58,7 +58,7 @@ def _make_fake_bin(tmp_path, monkeypatch, name: str, version: str,
         ")\r\n"
         f'echo %* > "{args_log}"\r\n'
         f'echo %CD% > "{cwd_log}"\r\n'
-        f"echo {reply}\r\n"
+        f"echo({reply}\r\n"
         "exit /b 0\r\n",
         "#!/bin/sh\n"
         f'if [ "$1" = "--version" ]; then\n'
@@ -225,6 +225,149 @@ def test_unknown_backend_raises_clear_error(monkeypatch):
         agents.codex_exec("prompt", cwd=".")
     with pytest.raises(ValueError, match="unknown FDE_AGENT_BACKEND"):
         agents.codex_version()
+
+
+# --------------------------------------------------------------------------- #
+# agent-in-container mode (FDE_AGENT_CONTAINER=1, Layer 5)
+# --------------------------------------------------------------------------- #
+# FDE_AGENT_CONTAINER=1 routes the agent CLI ITSELF into the fde-agent
+# container via sandbox.run_agent_in_docker: `docker run ... <image>
+# <bare binary> <flags> <prompt>` — no .cmd shim resolution, no host
+# binary. The fake docker below answers the daemon preflight (`version`)
+# without logging it (so the log's first line is the run under test),
+# logs its argv, and prints a canned agent reply on `run`.
+
+def _make_fake_agent_docker(tmp_path, monkeypatch, reply: str) -> dict:
+    """Put a fake `docker` CLI on PATH for container-mode agent runs:
+    answers --version + version (silent, unlogged), logs its argv to
+    docker-args.txt, prints `reply` on `run`, answers kill/rm instantly."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    args_log = tmp_path / "docker-args.txt"
+    _write_bin_shim(
+        bin_dir, "docker",
+        "@echo off\r\n"
+        'if "%1"=="--version" (\r\n'
+        "  echo docker 29.7.2-fake\r\n"
+        "  exit /b 0\r\n"
+        ")\r\n"
+        'if "%1"=="version" (\r\n'
+        "  echo docker 29.7.2-fake\r\n"
+        "  exit /b 0\r\n"
+        ")\r\n"
+        f'echo %* >> "{args_log}"\r\n'
+        f"echo({reply}\r\n"
+        "exit /b 0\r\n",
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then\n'
+        "  echo docker 29.7.2-fake\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "version" ]; then\n'
+        "  echo docker 29.7.2-fake\n"
+        "  exit 0\n"
+        "fi\n"
+        f'echo "$*" >> "{args_log}"\n'
+        f"echo '{reply}'\n"
+        "exit 0\n",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep
+                       + os.environ.get("PATH", ""))
+    return {"args": args_log}
+
+
+def _docker_run_argv(log: Path) -> str:
+    """Normalized (single-space-joined) argv of the first docker
+    invocation — the run under test (preflight calls are unlogged)."""
+    return " ".join(log.read_text(encoding="utf-8").split())
+
+
+def test_container_mode_deepseek_routes_bare_dsh_through_docker(
+        monkeypatch, tmp_path):
+    """FDE_AGENT_CONTAINER=1 -> codex_exec routes `dsh --profile headless
+    <prompt>` — the BARE binary name, no shim resolution, no .cmd anywhere
+    — through the container; summary + result shape are unchanged."""
+    logs = _make_fake_agent_docker(
+        tmp_path, monkeypatch, "fake dsh reply: repro test written")
+    monkeypatch.setenv("FDE_AGENT_CONTAINER", "1")
+    monkeypatch.setattr(agents, "BACKEND", "deepseek")
+    prompt = "write ONE failing test file"
+
+    res = agents.codex_exec(prompt, cwd=str(tmp_path))
+
+    # same contract as the host path: rc/out/timed_out/summary/duration_ms
+    assert res["rc"] == 0
+    assert res["timed_out"] is False
+    assert res["summary"] == "fake dsh reply: repro test written"
+    assert "duration_ms" in res
+    argv = _docker_run_argv(logs["args"])
+    assert argv.split()[0] == "run"
+    assert "dsh --profile headless" in argv
+    assert "write ONE failing test file" in argv
+    assert ".cmd" not in argv  # bare names resolve inside the image
+
+
+def test_container_mode_claude_routes_bare_claude_through_docker(
+        monkeypatch, tmp_path):
+    """FDE_AGENT_CONTAINER=1 -> the claude backend routes the bare `claude`
+    binary + headless flags through the container; summary parsed from the
+    JSON reply exactly like the host path."""
+    logs = _make_fake_agent_docker(tmp_path, monkeypatch, FAKE_REPLY)
+    monkeypatch.setenv("FDE_AGENT_CONTAINER", "1")
+    monkeypatch.setattr(agents, "BACKEND", "claude")
+
+    res = agents.codex_exec("write ONE failing test file", cwd=str(tmp_path))
+
+    assert res["rc"] == 0
+    assert res["summary"] == "fake claude reply: repro test written"
+    argv = _docker_run_argv(logs["args"])
+    assert ("claude -p --output-format json --dangerously-skip-permissions"
+            in argv)
+
+
+def test_container_mode_codex_routes_bare_codex_through_docker(
+        monkeypatch, tmp_path):
+    """FDE_AGENT_CONTAINER=1 -> the codex path routes `codex exec --json -s
+    danger-full-access <prompt>` through the container — no -C cwd (the
+    container workdir is /workspace), no host Popen."""
+    logs = _make_fake_agent_docker(
+        tmp_path, monkeypatch,
+        '{"type":"chat_message","payload":{"message":'
+        '{"content":"fake codex reply"}}}')
+    monkeypatch.setenv("FDE_AGENT_CONTAINER", "1")
+    monkeypatch.setattr(agents, "BACKEND", "codex")
+
+    res = agents.codex_exec("prompt", cwd=str(tmp_path))
+
+    assert res["rc"] == 0
+    assert res["summary"] == "fake codex reply"
+    argv = _docker_run_argv(logs["args"])
+    assert "codex exec --json -s danger-full-access prompt" in argv
+    assert "-C" not in argv.split()
+
+
+def test_container_mode_version_probe_through_docker(monkeypatch, tmp_path):
+    """codex_version() in container mode runs [binary, --version] inside
+    the container and returns the first non-empty line."""
+    logs = _make_fake_agent_docker(tmp_path, monkeypatch, "dsh 0.1.0-fake")
+    monkeypatch.setenv("FDE_AGENT_CONTAINER", "1")
+    monkeypatch.setattr(agents, "BACKEND", "deepseek")
+
+    assert agents.codex_version() == "dsh 0.1.0-fake"
+
+    argv = _docker_run_argv(logs["args"])
+    assert "dsh --version" in argv
+
+
+def test_container_mode_version_unknown_when_no_output(
+        monkeypatch, tmp_path):
+    """Best-effort version probe: an empty container reply -> 'unknown',
+    never a crash."""
+    _make_fake_agent_docker(tmp_path, monkeypatch, "")
+    monkeypatch.setenv("FDE_AGENT_CONTAINER", "1")
+    monkeypatch.setattr(agents, "BACKEND", "deepseek")
+
+    assert agents.codex_version() == "unknown"
 
 
 # --------------------------------------------------------------------------- #

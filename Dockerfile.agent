@@ -1,0 +1,29 @@
+# fde-agent — the containerized agent CLI for ticket-to-fix (Layer 5).
+#
+# FDE_AGENT_CONTAINER=1 routes codex/dsh/claude runs through this image:
+# the agent process itself can no longer touch the host.
+#
+# Security contract:
+#   - Everything is installed at BUILD time; the image has no runtime
+#     network (the container's egress is controlled at run time via
+#     --network + operator-side allowlisting).
+#   - API keys are injected at RUNTIME via -e (see sandbox.run_agent_in_docker
+#     env allowlist) — never baked in, never in the image layers.
+#   - Same resource-limit policy as the fde-sandbox command container is
+#     applied at run time (memory/cpus/pids, read-only rootfs, tmpfs /tmp).
+#
+# Build: docker build -f Dockerfile.agent -t fde-agent:latest .
+
+FROM node:22-slim
+
+# git (worktree hygiene for the agent's edits) + CA certs (TLS to the API)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The agent CLIs, pinned. dsh is a developer preview — pinned exactly.
+RUN npm install -g @deepseek-ai/dsh@0.1.0-rc.6 @openai/codex
+
+# npm global bin is already on PATH for the node image; the agent entry
+# (dsh/codex/claude) is passed as the container command at run time.
+WORKDIR /workspace

@@ -37,6 +37,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -294,5 +295,145 @@ def run_in_docker(cmd: str, cwd: str, timeout: int = 60) -> dict:
         except subprocess.TimeoutExpired:
             _best_effort([docker, "kill", name])
             return {"rc": -1, "out": "[timeout]", "timed_out": True}
+    finally:
+        _best_effort([docker, "rm", "-f", name])
+
+
+# --------------------------------------------------------------------------- #
+# Layer 5: agent-in-container (FDE_AGENT_CONTAINER=1)
+# --------------------------------------------------------------------------- #
+# ``FDE_AGENT_CONTAINER=1`` routes the AGENT CLI itself (codex/dsh/claude)
+# into a container — the agent can no longer touch the host even as a
+# process. Independent of FDE_SANDBOX, which isolates the harness COMMANDS.
+# Unset -> today's host behavior, byte-identical.
+#
+# ``agent_argv[0]`` is the BARE binary name as it exists on PATH inside the
+# agent image (e.g. "dsh", "claude", "codex") — there are no .cmd shims
+# inside the Linux image. The worktree is mounted at ``/workspace`` (also
+# the workdir), the network is ``bridge`` by default (the agent NEEDS
+# egress to its API; domain-level egress allowlisting is the operator's
+# job — host iptables or an egress proxy, since Docker Desktop cannot
+# filter by domain natively), and the hardening family is the same as
+# run_in_docker (``--cap-drop ALL``, ``--security-opt no-new-privileges``,
+# env-overridable ``--memory``/``--cpus``/``--pids-limit``, ``--read-only``
+# with a writable ``--tmpfs /tmp``).
+#
+# Env passthrough is an EXPLICIT ALLOWLIST (``_AGENT_ENV_ALLOWLIST``: the
+# API keys + base URLs, plus ``http_proxy``/``https_proxy`` when
+# ``FDE_AGENT_PROXY`` is set) — never the whole host env, so host secrets
+# cannot leak into the container or into the docker argv.
+#
+# The watchdog POLLS the docker CLI (1s) and on deadline runs
+# ``docker kill <name>`` — the container itself MUST be killed, because
+# tree-killing the docker CLI process would leave the container running.
+# Teardown (``docker rm -f``) is best-effort and idempotent.
+
+_AGENT_ENV_ALLOWLIST = (
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_GO_BASE_URL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "ANTHROPIC_API_KEY",
+)
+
+_MISSING_DOCKER_AGENT_MSG = (
+    "FDE_AGENT_CONTAINER=1 but the docker CLI was not found on PATH — "
+    "start Docker Desktop or unset FDE_AGENT_CONTAINER")
+
+_DAEMON_DOWN_AGENT_MSG = (
+    "FDE_AGENT_CONTAINER=1 but the docker daemon is not reachable — "
+    "start Docker Desktop or unset FDE_AGENT_CONTAINER")
+
+
+def _agent_env_args() -> list[str]:
+    """``-e`` flags for the explicit env allowlist (API keys + proxy vars).
+
+    Only variables present in ``os.environ`` are passed; proxy vars appear
+    only when ``FDE_AGENT_PROXY`` is set (its value fills both
+    ``http_proxy`` and ``https_proxy`` — the var itself is never forwarded).
+    Nothing else from the host env crosses into the container.
+    """
+    args: list[str] = []
+    for key in _AGENT_ENV_ALLOWLIST:
+        if key in os.environ:
+            args += ["-e", f"{key}={os.environ[key]}"]
+    proxy = os.environ.get("FDE_AGENT_PROXY")
+    if proxy:
+        args += ["-e", f"http_proxy={proxy}", "-e", f"https_proxy={proxy}"]
+    return args
+
+
+def run_agent_in_docker(agent_argv: list[str], worktree: str,
+                        timeout: int = 900) -> dict:
+    """Run the agent CLI itself inside an ephemeral ``fde-agent`` container.
+
+    ``agent_argv`` is the full argv as it should run INSIDE the image: a
+    bare binary name (``dsh``/``claude``/``codex``) plus flags and the
+    prompt — no shim resolution, no ``bash -c`` wrapper. The worktree is
+    mounted at ``/workspace`` (also the workdir), so the agent sees only
+    the run's files.
+
+    Returns ``{"rc", "out", "timed_out", "duration_ms"}``: ``out`` is
+    stdout + stderr combined. On timeout the CONTAINER is killed
+    (``docker kill <name>`` — tree-killing the docker CLI would leave it
+    running) and the result is ``{"rc": -1, "out": "[timeout]",
+    "timed_out": True, ...}``. The container is always removed in a
+    finally (``docker rm -f`` is idempotent; ``--rm`` covers the normal
+    path too).
+    """
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError(_MISSING_DOCKER_AGENT_MSG)
+    if not _daemon_ready(docker):
+        raise RuntimeError(_DAEMON_DOWN_AGENT_MSG)
+    name = "fde-agent-" + uuid.uuid4().hex[:8]
+    hardening = [
+        "--memory", os.environ.get("FDE_SANDBOX_MEMORY") or "1g",
+        "--cpus", os.environ.get("FDE_SANDBOX_CPUS") or "2",
+        "--pids-limit", os.environ.get("FDE_SANDBOX_PIDS") or "256",
+        "--read-only",
+        "--tmpfs", "/tmp",
+    ]
+    argv = [
+        docker, "run", "--rm", "--name", name,
+        "-v", f"{os.path.abspath(worktree)}:/workspace",
+        "-w", "/workspace",
+        "--network", os.environ.get("FDE_AGENT_NETWORK", "bridge"),
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        *hardening,
+        *_agent_env_args(),
+        os.environ.get("FDE_AGENT_IMAGE", "fde-agent:latest"),
+        *agent_argv,
+    ]
+    t0 = time.monotonic()
+    proc = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    )
+    try:
+        timed_out = False
+        deadline = time.monotonic() + timeout
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                timed_out = True
+                _best_effort([docker, "kill", name])
+                # unblock a docker CLI mid-write into our pipes (it exits
+                # once the container is dead); no point draining further
+                for stream in (proc.stdout, proc.stderr):
+                    if stream:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                break
+            time.sleep(1)
+        if timed_out:
+            return {"rc": -1, "out": "[timeout]", "timed_out": True,
+                    "duration_ms": int((time.monotonic() - t0) * 1000)}
+        out, err = proc.communicate()
+        return {"rc": proc.returncode, "out": (out or "") + (err or ""),
+                "timed_out": False,
+                "duration_ms": int((time.monotonic() - t0) * 1000)}
     finally:
         _best_effort([docker, "rm", "-f", name])

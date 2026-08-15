@@ -582,6 +582,208 @@ def test_hardening_flags_env_overrides(tmp_path, monkeypatch):
     assert "--tmpfs /tmp" in argv
 
 
+# --- Layer 5: agent-in-container (FDE_AGENT_CONTAINER=1) -----------------
+# run_agent_in_docker routes the AGENT CLI itself (codex/dsh/claude) into
+# the fde-agent container: worktree mounted at /workspace, bridge network
+# (the agent NEEDS egress to its API), the same hardening family as
+# run_in_docker, an EXPLICIT env allowlist (API keys + proxy vars only —
+# never the whole host env), and a watchdog that docker-kills the
+# container on timeout (tree-killing the docker CLI would leave it
+# running). agent_argv[0] is the BARE binary name as it exists on PATH
+# inside the image — no .cmd shim resolution.
+
+def _agent_env_host(monkeypatch):
+    """Host env carrying the full allowlist plus a decoy secret that must
+    never cross into the container."""
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-cx-test")
+    monkeypatch.setenv("OPENCODE_GO_BASE_URL", "https://opencode.example")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://deepseek.example")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-an-test")
+    monkeypatch.setenv("HOST_ONLY_SECRET", "xyz-decoy")
+
+
+def test_run_agent_in_docker_argv(tmp_path, monkeypatch):
+    """run_agent_in_docker builds the docker-run argv: worktree mount,
+    /workspace workdir, bridge network by default, the hardening flag
+    family, the fde-agent image, and the BARE agent argv (flags + prompt)
+    at the END — no shim resolution, no bash -c wrapper."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    sb = _sandbox()
+    wt = tmp_path / "work"
+    wt.mkdir()
+
+    res = sb.run_agent_in_docker(
+        ["dsh", "--profile", "headless", "write a repro test"], str(wt), 30)
+
+    # return shape: run_cmd shape + duration_ms
+    assert set(res) >= {"rc", "out", "timed_out", "duration_ms"}
+    assert res["rc"] == 0
+    assert res["timed_out"] is False
+    assert res["duration_ms"] >= 0
+    assert FAKE_DOCKER_RAN in res["out"]
+
+    argv = _docker_argv(logs["args"])
+    assert argv.split()[0] == "run"
+    assert "--rm" in argv
+    assert re.search(r"--name fde-agent-[0-9a-f]{8}", argv)
+    assert f"{os.path.abspath(str(wt))}:/workspace" in argv
+    assert "-w /workspace" in argv
+    assert "--network bridge" in argv
+    assert "fde-agent:latest" in argv
+    for m in ("--cap-drop ALL", "--security-opt no-new-privileges",
+              "--memory 1g", "--cpus 2", "--pids-limit 256",
+              "--read-only", "--tmpfs /tmp"):
+        assert m in argv
+    # bare binary name + flags + prompt at the very end, no shim anywhere
+    assert "dsh --profile headless write a repro test" in argv
+    assert ".cmd" not in argv
+    # contract order: run --rm --name -v -w --network ... <image> <agent>
+    markers = ["--rm", "--name", f"{os.path.abspath(str(wt))}:/workspace",
+               "-w /workspace", "--network bridge", "--cap-drop ALL",
+               "--security-opt no-new-privileges", "--memory 1g", "--cpus 2",
+               "--pids-limit 256", "--read-only", "--tmpfs /tmp",
+               "fde-agent:latest", "dsh"]
+    positions = [argv.index(m) for m in markers]
+    assert positions == sorted(positions)
+
+
+def test_run_agent_in_docker_network_and_image_overrides(tmp_path, monkeypatch):
+    """FDE_AGENT_NETWORK and FDE_AGENT_IMAGE override the defaults."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_AGENT_NETWORK", "fde-net")
+    monkeypatch.setenv("FDE_AGENT_IMAGE", "fde-agent:test")
+    sb = _sandbox()
+    wt = tmp_path / "work"
+    wt.mkdir()
+
+    sb.run_agent_in_docker(["dsh", "prompt"], str(wt), 30)
+
+    argv = _docker_argv(logs["args"])
+    assert "--network fde-net" in argv
+    assert "fde-agent:test" in argv
+    assert "fde-agent:latest" not in argv
+
+
+def test_run_agent_in_docker_env_allowlist(tmp_path, monkeypatch):
+    """Only the explicit allowlist crosses into the container: API keys +
+    base URLs, plus http(s)_proxy when FDE_AGENT_PROXY is set. A decoy host
+    secret NEVER appears in the docker argv (no whole-host-env passthrough),
+    and FDE_AGENT_PROXY itself is not forwarded."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    _agent_env_host(monkeypatch)
+    monkeypatch.setenv("FDE_AGENT_PROXY", "http://proxy.example:8080")
+    sb = _sandbox()
+    wt = tmp_path / "work"
+    wt.mkdir()
+
+    sb.run_agent_in_docker(["dsh", "prompt"], str(wt), 30)
+
+    argv = _docker_argv(logs["args"])
+    for key in ("OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL",
+                "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
+                "ANTHROPIC_API_KEY"):
+        assert f"-e {key}" in argv
+    assert "-e http_proxy" in argv
+    assert "-e https_proxy" in argv
+    assert "-e FDE_AGENT_PROXY" not in argv
+    raw = logs["args"].read_text(encoding="utf-8")
+    assert "HOST_ONLY_SECRET" not in raw
+    assert "xyz-decoy" not in raw
+
+
+def test_run_agent_in_docker_no_proxy_without_fde_agent_proxy(
+        tmp_path, monkeypatch):
+    """No FDE_AGENT_PROXY -> no proxy -e flags at all (allowlist only)."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    _agent_env_host(monkeypatch)
+    monkeypatch.delenv("FDE_AGENT_PROXY", raising=False)
+    sb = _sandbox()
+    wt = tmp_path / "work"
+    wt.mkdir()
+
+    sb.run_agent_in_docker(["dsh", "prompt"], str(wt), 30)
+
+    argv = _docker_argv(logs["args"])
+    assert "-e http_proxy" not in argv
+    assert "-e https_proxy" not in argv
+
+
+def test_agent_env_args_exact_pairs(monkeypatch):
+    """_agent_env_args emits exact KEY=value -e pairs for the allowlist only
+    (platform-independent: the .cmd fake strips '=value', the Python-level
+    contract does not)."""
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-cx")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-an")
+    monkeypatch.setenv("HOST_ONLY_SECRET", "xyz")
+    monkeypatch.setenv("FDE_AGENT_PROXY", "http://p:8080")
+    sb = _sandbox()
+
+    args = sb._agent_env_args()
+
+    assert args == [
+        "-e", "OPENCODE_GO_API_KEY=sk-cx",
+        "-e", "DEEPSEEK_API_KEY=sk-ds",
+        "-e", "ANTHROPIC_API_KEY=sk-an",
+        "-e", "http_proxy=http://p:8080",
+        "-e", "https_proxy=http://p:8080",
+    ]
+
+
+def test_run_agent_in_docker_timeout_kills_container(tmp_path, monkeypatch):
+    """Fake docker sleeps past the timeout -> the CONTAINER is docker-killed
+    (logged by the fake — tree-killing the docker CLI would leave it
+    running) and the result is the [timeout] shape."""
+    logs = _make_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv("FDE_FAKE_DOCKER_DELAY", "5")
+    sb = _sandbox()
+    wt = tmp_path / "work"
+    wt.mkdir()
+
+    res = sb.run_agent_in_docker(["dsh", "prompt"], str(wt), 1)
+
+    assert res["timed_out"] is True
+    assert res["rc"] == -1
+    assert res["out"] == "[timeout]"
+    assert res["duration_ms"] >= 0
+    lines = logs["args"].read_text(encoding="utf-8").splitlines()
+    assert re.search(r"run --rm --name fde-agent-[0-9a-f]{8}", lines[0])
+    assert re.search(r"kill fde-agent-[0-9a-f]{8}", lines[1])
+    assert re.search(r"rm -f fde-agent-[0-9a-f]{8}", lines[2])
+
+
+def test_run_agent_in_docker_daemon_down_raises(tmp_path, monkeypatch):
+    """Daemon unreachable -> RuntimeError naming the FDE_AGENT_CONTAINER
+    context — fail fast, never a fallback to host execution."""
+    _make_fake_docker(tmp_path, monkeypatch, daemon_down=True)
+    sb = _sandbox()
+    wt = tmp_path / "work"
+    wt.mkdir()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sb.run_agent_in_docker(["dsh", "prompt"], str(wt), 30)
+
+    msg = str(excinfo.value)
+    assert "FDE_AGENT_CONTAINER" in msg
+    assert "daemon" in msg
+
+
+def test_run_agent_in_docker_missing_docker_raises(tmp_path, monkeypatch):
+    """No docker CLI -> RuntimeError naming FDE_AGENT_CONTAINER."""
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    sb = _sandbox()
+    wt = tmp_path / "work"
+    wt.mkdir()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sb.run_agent_in_docker(["dsh", "prompt"], str(wt), 30)
+
+    assert "FDE_AGENT_CONTAINER" in str(excinfo.value)
+
+
 # --- Real-docker integration tests (skip when no daemon) -----------------
 
 def _docker_available() -> bool:

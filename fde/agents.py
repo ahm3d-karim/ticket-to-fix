@@ -29,8 +29,10 @@ from pathlib import Path
 
 from .config import load_repo_manifest
 from .harness import run_cmd, verify_repro
-from .runlog import append, run_dir
+from . import sandbox
 from .sandbox import gold_path_in_sandbox
+from .gates import scrub_ticket
+from .runlog import append, run_dir
 from .ticket import parse_ticket
 
 BACKEND = os.environ.get("FDE_AGENT_BACKEND", "codex")
@@ -57,6 +59,13 @@ def _dispatch_backend() -> str:
     return backend
 
 
+def _agent_in_container() -> bool:
+    """True when FDE_AGENT_CONTAINER=1 (read at call time, never at import
+    — tests monkeypatch os.environ). Routes the agent CLI ITSELF into the
+    fde-agent container instead of running it on the host."""
+    return os.environ.get("FDE_AGENT_CONTAINER") == "1"
+
+
 class AgentAuthError(Exception):
     """The model provider rejected the API key (401). Raised so the failure
     surfaces as 'agent auth failed', never as a harness rejection."""
@@ -64,10 +73,21 @@ class AgentAuthError(Exception):
 
 def codex_version() -> str:
     """Best-effort version string for the active backend ("unknown" on any
-    failure — never a crash; the mock never touches a real binary)."""
+    failure — never a crash; the mock never touches a real binary). In
+    container mode (FDE_AGENT_CONTAINER=1) the probe runs INSIDE the
+    fde-agent container via the bare binary name."""
     backend = _dispatch_backend()
     if backend == "mock":
         return "mock"
+    if _agent_in_container():
+        binary = {"claude": "claude", "deepseek": "dsh"}.get(backend, "codex")
+        try:
+            r = sandbox.run_agent_in_docker([binary, "--version"], ".", 30)
+            return next(
+                (l.strip() for l in r["out"].splitlines() if l.strip()),
+                "unknown")
+        except Exception:
+            return "unknown"
     binary = {"claude": _claude_binary(), "deepseek": _deepseek_binary()}.get(
         backend, "codex")
     try:
@@ -203,6 +223,16 @@ def codex_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
         return _claude_exec(prompt, cwd, timeout)
     if backend == "deepseek":
         return _deepseek_exec(prompt, cwd, timeout)
+    if _agent_in_container():
+        # the agent binary ITSELF runs inside the fde-agent container: the
+        # bare `codex` name resolves on the image's PATH (no .cmd shim
+        # lookup), the container workdir is the worktree mount (/workspace)
+        # so there is no -C cwd, and only the allowlisted env crosses over
+        res = sandbox.run_agent_in_docker(
+            ["codex", "exec", "--json", "-s", "danger-full-access", prompt],
+            cwd, timeout)
+        res["summary"] = _last_message(res["out"])
+        return res
     flags = ["codex", "exec", "--json", "-s", "danger-full-access", "-C", cwd, prompt]
     env = os.environ.copy()
     if "OPENCODE_GO_API_KEY" not in env:
@@ -355,7 +385,18 @@ def _run_cli(argv: list[str], cwd: str, timeout: int, missing_msg: str,
 
 
 def _claude_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
-    """Run the Claude Code CLI headless in the run's worktree (cwd)."""
+    """Run the Claude Code CLI headless in the run's worktree (cwd).
+
+    Container mode (FDE_AGENT_CONTAINER=1): the bare `claude` binary + the
+    same headless flags run INSIDE the fde-agent container (no shim
+    resolution); summary extraction is identical to the host path.
+    """
+    if _agent_in_container():
+        res = sandbox.run_agent_in_docker(
+            ["claude", "-p", "--output-format", "json",
+             "--dangerously-skip-permissions", prompt], cwd, timeout)
+        res["summary"] = _claude_last_message(res["out"])
+        return res
     argv = _headless_cli_argv(
         _claude_binary(),
         ["-p", "--output-format", "json", "--dangerously-skip-permissions"],
@@ -412,6 +453,13 @@ def _headless_cli_argv(binary: str, args: list[str], prompt: str) -> list[str]:
     return [binary, *args, prompt]
 
 
+def _deepseek_last_message(out: str) -> str:
+    """Extract the final reply from `dsh --profile headless` output (the
+    harness prints its final answer last)."""
+    return next((l.strip() for l in reversed(out.splitlines()) if l.strip()),
+                "")
+
+
 def _deepseek_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     """Run DeepSeek Harness headless in the run's worktree (cwd).
 
@@ -419,7 +467,16 @@ def _deepseek_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
     prints the final answer, and exits (apps/cli docs). The invoking
     directory is the default workspace root, so cwd=worktree is the analogue
     of codex's `-C cwd`. Developer preview upstream: pin the npm version.
+
+    Container mode (FDE_AGENT_CONTAINER=1): the bare `dsh` binary + the
+    same flags run INSIDE the fde-agent container (no shim resolution);
+    summary extraction is identical to the host path.
     """
+    if _agent_in_container():
+        res = sandbox.run_agent_in_docker(
+            ["dsh", "--profile", "headless", prompt], cwd, timeout)
+        res["summary"] = _deepseek_last_message(res["out"])
+        return res
     argv = _headless_cli_argv(
         _deepseek_binary(), ["--profile", "headless"], prompt)
     return _run_cli(
@@ -427,8 +484,7 @@ def _deepseek_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
         "FDE_AGENT_BACKEND=deepseek but the `dsh` CLI was not found on "
         "PATH — install it (npm install -g @deepseek-ai/dsh) "
         "or set FDE_AGENT_BACKEND=codex|mock",
-        lambda out: next((l.strip() for l in reversed(out.splitlines())
-                          if l.strip()), ""))
+        _deepseek_last_message)
 
 
 # --------------------------------------------------------------------------- #
@@ -572,6 +628,7 @@ def _mock_exec(prompt: str, cwd: str, timeout: int = ROUND_TIMEOUT) -> dict:
 
 def _repro_prompt(ticket: dict, manifest: dict, repro_path: Path,
                   feedback: str | None) -> str:
+    ticket = scrub_ticket(ticket)  # secrets never reach the model API
     p = [
         "You are the reproduction agent in a bug-fix pipeline. The working",
         "directory is a git worktree of the buggy repo.",
@@ -605,6 +662,7 @@ def _repro_prompt(ticket: dict, manifest: dict, repro_path: Path,
 
 def _fix_prompt(ticket: dict, manifest: dict, repro_path: Path,
                 feedback: str | None) -> str:
+    ticket = scrub_ticket(ticket)  # secrets never reach the model API
     p = [
         "You are the fix agent in a bug-fix pipeline. The working directory is",
         "a git worktree of the buggy repo. A failing reproduction test exists at:",
